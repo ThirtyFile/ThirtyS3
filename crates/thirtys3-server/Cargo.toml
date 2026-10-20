@@ -11,7 +11,24 @@ keywords = ["s3", "aws", "sigv4"]
 categories = ["network-programming"]
 
 [dependencies]
+async-trait = "0.1.92"
+bytes = "1.12.1"
+futures-util = "0.3.34"
+http = "1.5.0"
+http-body = "1.1.0"
+http-body-util = "0.1.5"
 thirtys3-core.workspace = true
+tokio = { version = "1.54.0", features = ["rt", "time", "sync", "macros"] }
+tower-service = "0.3.3"
+tracing = "0.1.44"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+bytes = "1.12.1"
+futures-util = "0.3.34"
+hyper = { version = "1.12.0", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "http1", "client-legacy"] }
+thirtys3-client = { path = "../thirtys3-client" }
+tokio = { version = "1.54.0", features = ["full"] }

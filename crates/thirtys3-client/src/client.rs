@@ -174,6 +174,10 @@ impl Client {
         let target = &self.inner.target;
         let mut headers: Vec<(String, String)> = vec![("host".to_owned(), target.authority.clone()), ("user-agent".to_owned(), self.inner.user_agent.clone())];
         headers.extend(spec.headers.iter().cloned());
+        // A request that stores something has a Content-Length even when the body is empty, as S3 requires and hyper does not add.
+        if spec.body.is_empty() && (spec.method == Method::PUT || spec.method == Method::POST) {
+            headers.push(("content-length".to_owned(), "0".to_owned()));
+        }
         let borrowed: Vec<(&str, &str)> = headers.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
         let parts = SignedRequestParts { method: spec.method.as_str(), path: &spec.path, query: &spec.query, headers: &borrowed };
         let signed = self.inner.signer.sign(&parts, &spec.payload_hash, time).map_err(|error| Error::InvalidInput(error.to_string()))?;

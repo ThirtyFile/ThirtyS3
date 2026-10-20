@@ -264,6 +264,11 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 
+/// Reads Base64 (standard alphabet, with padding). Spaces around the text are ignored. `None` for anything that is not Base64.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    STANDARD.decode(text.trim()).ok()
+}
+
 /// The digest of a composite checksum of a multipart upload: the checksum of the part digests put one after the other. The documentation says
 /// that a composite checksum "is calculated based on the individual checksums of each part" and shows it computed this way (its Java example
 /// feeds each part's SHA-256 into one more SHA-256).

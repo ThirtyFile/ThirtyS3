@@ -273,22 +273,28 @@ pub fn parse_request_auth(request: &Request<'_>) -> Result<Option<ParsedAuth>, S
 }
 
 impl ParsedAuth {
+    /// Checks the time of the request against `now`: a header signature is good when the date is within 15 minutes of `now`; a presigned URL
+    /// from 15 minutes before its date until its expiry. It does not look at the signature, so a server can refuse a request whose clock is out
+    /// of step before it counts as an attempt to guess a key.
+    pub fn check_time(&self, now: Timestamp) -> Result<(), SigError> {
+        let skewed = SigError::RequestTimeTooSkewed { request_time: self.time, server_time: now };
+        match self.expires_secs {
+            None if (now.0 - self.time.0).abs() > MAX_CLOCK_SKEW => Err(skewed),
+            Some(_) if self.time.0 - now.0 > MAX_CLOCK_SKEW => Err(skewed),
+            Some(expires) if now.0 > self.time.0 + expires as i64 => Err(SigError::Expired(Timestamp(self.time.0 + expires as i64))),
+            _ => Ok(()),
+        }
+    }
+
     /// Checks the time and the signature of `request` against the secret of [`access_key_id`](Self::access_key_id).
     ///
-    /// - The time: a header signature is good when the date is within 15 minutes of `now`; a presigned URL from 15 minutes before its date until its
-    ///   expiry.
+    /// - The time, as [`check_time`](Self::check_time) does.
     /// - A header signature must cover every `x-amz-*` header of the request.
     /// - The signature is compared in constant time.
     ///
     /// The scope's region is not checked here: [`scope`](Self::scope) has it for the server to compare with its own.
     pub fn verify(&self, request: &Request<'_>, secret_access_key: &str, now: Timestamp) -> Result<Verified, SigError> {
-        let skewed = SigError::RequestTimeTooSkewed { request_time: self.time, server_time: now };
-        match self.expires_secs {
-            None if (now.0 - self.time.0).abs() > MAX_CLOCK_SKEW => return Err(skewed),
-            Some(_) if self.time.0 - now.0 > MAX_CLOCK_SKEW => return Err(skewed),
-            Some(expires) if now.0 > self.time.0 + expires as i64 => return Err(SigError::Expired(Timestamp(self.time.0 + expires as i64))),
-            _ => {}
-        }
+        self.check_time(now)?;
 
         let payload_header = header_value(request, "x-amz-content-sha256");
         let payload_text = match (self.kind, payload_header) {

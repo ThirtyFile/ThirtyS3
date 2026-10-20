@@ -297,3 +297,22 @@ async fn a_service_that_answers_404_to_deleting_what_is_gone_is_fine_too() {
     assert!(one_by_one.delete_many(&["gone".to_owned()]).await.unwrap().is_empty());
     assert_eq!(server.requests_matching(Method::DELETE, "/gone").len(), 2, "a 404 is not repeated");
 }
+
+#[tokio::test]
+async fn a_request_that_stores_something_says_its_length_even_when_there_is_nothing() {
+    // S3 wants a Content-Length on a PUT or a POST with an empty body; hyper leaves it out.
+    let server = TestServer::start().await;
+    let client = client(&server);
+    client.put("empty", Bytes::new(), &PutOptions::default()).await.unwrap();
+    client.create_multipart("k", &PutOptions::default()).await.unwrap();
+    let requests = server.requests();
+    assert_eq!(requests[0].method, Method::PUT);
+    assert_eq!(requests[0].header("content-length"), Some("0"));
+    assert_eq!(requests[1].method, Method::POST);
+    assert_eq!(requests[1].header("content-length"), Some("0"));
+    assert!(requests.iter().all(|request| request.authenticated));
+    // And a GET or a DELETE does not.
+    client.head("empty").await.unwrap();
+    client.delete("empty").await.unwrap();
+    assert_eq!(server.requests()[2].header("content-length"), None);
+}

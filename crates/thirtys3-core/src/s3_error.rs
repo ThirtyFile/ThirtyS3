@@ -39,6 +39,9 @@ pub mod code {
         INVALID_RANGE = "InvalidRange",
         INVALID_REQUEST = "InvalidRequest",
         KEY_TOO_LONG = "KeyTooLongError",
+        MALFORMED_TRAILER = "MalformedTrailerError",
+        MAX_MESSAGE_LENGTH_EXCEEDED = "MaxMessageLengthExceeded",
+        METADATA_TOO_LARGE = "MetadataTooLarge",
         MALFORMED_XML = "MalformedXML",
         METHOD_NOT_ALLOWED = "MethodNotAllowed",
         MISSING_CONTENT_LENGTH = "MissingContentLength",
@@ -191,8 +194,9 @@ pub const ERROR_STATUS: &[(&str, u16)] = &[
     ("NoSuchAccessPoint", 404),
     ("InvalidTag", 400),
     ("MalformedPolicy", 400),
-    // Not in the table: S3 answers 400 when the hash in x-amz-content-sha256 is not the hash of the body.
+    // Not in the table: S3 answers 400 when the hash in x-amz-content-sha256 is not the hash of the body, and when trailing headers are not well formed.
     ("XAmzContentSHA256Mismatch", 400),
+    ("MalformedTrailerError", 400),
 ];
 
 /// The HTTP status of an error code, when it is one this module knows.

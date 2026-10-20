@@ -6,7 +6,9 @@ service needs, not the whole API.
 - `thirtys3-core`: Signature Version 4 (signing, verifying, presigned URLs, `aws-chunked`), S3 XML, error responses, ETags and checksums
 - `thirtys3-client`: a client for objects, listings and multipart uploads, with retries, path-style and virtual-hosted addressing, and downloads that
   carry on from where they broke off
-- `thirtys3-server`: the protocol layer of a server, which takes `http` requests and returns `http` responses
+- `thirtys3-server`: the protocol layer of a server, which takes `http` requests and returns `http` responses. It checks signatures (header,
+  presigned URL and `aws-chunked` with its chunk signatures and trailing checksums), routes the 17 operations of a file service to a `Backend` trait you
+  implement, and answers with S3's errors. `MemoryBackend` is an in-memory implementation; `cargo run -p thirtys3-server --example memory_server` starts one
 - Not supported, and answered with `NotImplemented`: IAM and bucket policies, versioning, server-side encryption, Signature Version 2
 
 The library is under development and has no release yet.
@@ -15,6 +17,8 @@ The library is under development and has no release yet.
 
 - The AWS documentation's own examples and AWS's signing test suite, and 30,000 random requests signed by `aws-sigv4` as well
 - An in-memory S3 service that checks every signature, with faults on demand (errors, dropped connections, downloads cut off, a clock that is off)
+- The AWS CLI v2 against the server: `cp`, `sync`, `mv`, `rm`, `ls`, multipart uploads of large files, `presign` and the `s3api` calls (the tests are
+  skipped where `aws` is not installed)
 - [RustFS](https://github.com/rustfs/rustfs) in a container (`.github/workflows/services.yml`). MinIO no longer publishes container images.
 
 To run the tests of the client against a service of your own, set `THIRTYS3_TEST_ENDPOINT`, `THIRTYS3_TEST_BUCKET`, `THIRTYS3_TEST_ACCESS_KEY` and
