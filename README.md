@@ -14,8 +14,13 @@ It has three crates that work together or on their own:
 | `thirtys3-server` | Be an S3 endpoint in front of your own storage. Implement one trait and the usual tools just work. |
 | `thirtys3-core` | The shared parts: Signature Version 4, S3 XML, error responses, ETags, checksums. |
 
-> **Status:** version 0.1.0, not yet on crates.io. The tests are thorough, but it has not seen production traffic yet. Please try it, and tell us
-> what breaks.
+> **Status:** version 0.1.0, on [crates.io](https://crates.io/crates/thirtys3-client). The tests are thorough, but it has not seen production traffic yet. Please try
+> it, and tell us what breaks.
+
+```sh
+cargo add thirtys3-client   # to talk to an S3 service
+cargo add thirtys3-server   # to be one
+```
 
 ## Why another S3 library?
 
