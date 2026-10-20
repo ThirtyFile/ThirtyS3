@@ -120,4 +120,68 @@ impl Timestamp {
             _ => None,
         }
     }
+
+    /// `Fri, 24 May 2013 00:00:00 GMT`, the HTTP date of RFC 9110 (the form of `Date`, `Last-Modified` and `Expires`).
+    pub fn http_date(self) -> String {
+        let days = self.0.div_euclid(86400);
+        let (year, month, day) = civil_from_days(days);
+        let seconds = self.0.rem_euclid(86400);
+        // 1970-01-01 was a Thursday.
+        let weekday = WEEKDAYS[(days + 3).rem_euclid(7) as usize];
+        format!("{weekday}, {day:02} {} {year:04} {:02}:{:02}:{:02} GMT", MONTHS[(month - 1) as usize], seconds / 3600, seconds % 3600 / 60, seconds % 60)
+    }
+
+    /// Reads an HTTP date in any of the three forms RFC 9110 says a recipient has to accept: `Sun, 06 Nov 1994 08:49:37 GMT`,
+    /// `Sunday, 06-Nov-94 08:49:37 GMT` (a two-digit year below 70 is 20xx, otherwise 19xx) and `Sun Nov  6 08:49:37 1994`. The day of the week has to be
+    /// a real one but is not checked against the date.
+    pub fn parse_http_date(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if !text.is_ascii() {
+            return None;
+        }
+        let month = |name: &str| MONTHS.iter().position(|candidate| *candidate == name).map(|index| index as i64 + 1);
+        let number = |digits: &str, length: usize| -> Option<i64> {
+            (digits.len() == length && digits.bytes().all(|byte| byte.is_ascii_digit())).then(|| digits.parse().ok()).flatten()
+        };
+        let clock = |time: &str| -> Option<(i64, i64, i64)> {
+            let parts: Vec<&str> = time.split(':').collect();
+            let [hour, minute, second] = parts[..] else { return None };
+            Some((number(hour, 2)?, number(minute, 2)?, number(second, 2)?))
+        };
+        let (year, month, day, (hour, minute, second)) = if let Some((weekday, rest)) = text.split_once(", ") {
+            let fields: Vec<&str> = rest.split(' ').collect();
+            if WEEKDAYS.contains(&weekday) {
+                // Sun, 06 Nov 1994 08:49:37 GMT
+                let [day, month_name, year, time, "GMT"] = fields[..] else { return None };
+                (number(year, 4)?, month(month_name)?, number(day, 2)?, clock(time)?)
+            } else if LONG_WEEKDAYS.contains(&weekday) {
+                // Sunday, 06-Nov-94 08:49:37 GMT
+                let [date, time, "GMT"] = fields[..] else { return None };
+                let parts: Vec<&str> = date.split('-').collect();
+                let [day, month_name, year] = parts[..] else { return None };
+                let year = number(year, 2)?;
+                (if year < 70 { 2000 + year } else { 1900 + year }, month(month_name)?, number(day, 2)?, clock(time)?)
+            } else {
+                return None;
+            }
+        } else {
+            // Sun Nov  6 08:49:37 1994
+            let fields: Vec<&str> = text.split(' ').filter(|field| !field.is_empty()).collect();
+            let [weekday, month_name, day, time, year] = fields[..] else { return None };
+            if !WEEKDAYS.contains(&weekday) {
+                return None;
+            }
+            let day = if day.len() == 1 { number(&format!("0{day}"), 2)? } else { number(day, 2)? };
+            (number(year, 4)?, month(month_name)?, day, clock(time)?)
+        };
+        if day < 1 || day > days_in_month(year, month) || hour > 23 || minute > 59 || second > 60 {
+            return None;
+        }
+        // A leap second (60) is read as the second it is after.
+        Some(Self(days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second))
+    }
 }
+
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const LONG_WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

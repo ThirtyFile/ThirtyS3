@@ -168,6 +168,19 @@ fn parse_date(amz_date: &str, scope: &Scope) -> Result<Timestamp, SigError> {
     Ok(time)
 }
 
+/// The time of a request signed in the header: `x-amz-date`, or when the request has none the `Date` header, which Signature Version 4 allows as
+/// the other source of the time. A malformed `x-amz-date` is an error, not a reason to look at `Date`. With `Date` the time in the string to sign is
+/// that time as `YYYYMMDDTHHMMSSZ`. Returns that text and the time.
+fn header_date(request: &Request<'_>, scope: &Scope) -> Result<(String, Timestamp), SigError> {
+    if let Some(amz_date) = header_value(request, "x-amz-date") {
+        return Ok((amz_date.to_owned(), parse_date(amz_date, scope)?));
+    }
+    let date = header_value(request, "date").ok_or_else(|| SigError::MissingHeader("x-amz-date".to_owned()))?;
+    let time = Timestamp::parse_http_date(date).ok_or_else(|| SigError::InvalidDate(date.chars().take(40).collect()))?;
+    let amz_date = time.amz_date();
+    Ok((amz_date.clone(), parse_date(&amz_date, scope)?))
+}
+
 fn parse_header_auth(request: &Request<'_>, value: &str) -> Result<ParsedAuth, SigError> {
     let malformed = SigError::MalformedAuthorization;
     let Some(rest) = value.strip_prefix(ALGORITHM).filter(|rest| rest.starts_with(char::is_whitespace)) else {
@@ -190,15 +203,15 @@ fn parse_header_auth(request: &Request<'_>, value: &str) -> Result<ParsedAuth, S
         return Err(malformed("Credential, SignedHeaders and Signature are all required".to_owned()));
     };
     let (access_key_id, scope) = parse_credential(credential, malformed)?;
-    let amz_date = header_value(request, "x-amz-date").ok_or_else(|| SigError::MissingHeader("x-amz-date".to_owned()))?;
+    let (amz_date, time) = header_date(request, &scope)?;
     Ok(ParsedAuth {
         kind: AuthKind::Header,
         access_key_id,
-        time: parse_date(amz_date, &scope)?,
+        time,
         scope,
         signed_headers: parse_signed_headers(signed_headers, malformed)?,
         signature: parse_signature(signature, malformed)?,
-        amz_date: amz_date.to_owned(),
+        amz_date,
         expires_secs: None,
         session_token: header_value(request, "x-amz-security-token").map(str::to_owned),
     })
