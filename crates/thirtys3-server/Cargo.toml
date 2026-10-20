@@ -1,0 +1,17 @@
+[package]
+name = "thirtys3-server"
+description = "A small S3 server protocol layer: authentication and routing for the operations a file service offers, on http types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["s3", "aws", "sigv4"]
+categories = ["network-programming"]
+
+[dependencies]
+thirtys3-core.workspace = true
+
+[lints]
+workspace = true

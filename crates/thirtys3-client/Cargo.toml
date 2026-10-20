@@ -1,0 +1,17 @@
+[package]
+name = "thirtys3-client"
+description = "A small S3 client: the calls a file service needs, with retries, path-style and virtual-hosted addressing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["s3", "aws", "sigv4"]
+categories = ["network-programming"]
+
+[dependencies]
+thirtys3-core.workspace = true
+
+[lints]
+workspace = true

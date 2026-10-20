@@ -1,0 +1,4 @@
+# The same style as ThirtyFile: long lines, with calls, chains and struct literals kept on one line as long as the line fits.
+# `cargo fmt` formats everything.
+max_width = 165
+use_small_heuristics = "Max"
