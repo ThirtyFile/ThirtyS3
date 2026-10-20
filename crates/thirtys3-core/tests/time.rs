@@ -63,3 +63,55 @@ fn text_that_is_not_a_date_is_refused() {
 fn now_is_after_the_year_2025() {
     assert!(Timestamp::now().0 > 1_735_689_600);
 }
+
+#[test]
+fn iso_8601_is_the_form_s3_writes() {
+    assert_eq!(Timestamp(0).iso8601(), "1970-01-01T00:00:00.000Z");
+    assert_eq!(Timestamp(1_255_369_830).iso8601(), "2009-10-12T17:50:30.000Z");
+    assert_eq!(Timestamp(-1).iso8601(), "1969-12-31T23:59:59.000Z");
+    assert_eq!(Timestamp::parse_iso8601("2009-10-12T17:50:30.000Z"), Some(Timestamp(1_255_369_830)));
+}
+
+#[test]
+fn iso_8601_reads_the_forms_in_the_documentation_and_offsets() {
+    let base = Timestamp::parse_amz_date("20191211T233247Z").unwrap();
+    assert_eq!(Timestamp::parse_iso8601("2019-12-11T23:32:47+00:00"), Some(base));
+    assert_eq!(Timestamp::parse_iso8601("2019-12-11T23:32:47-00:00"), Some(base));
+    assert_eq!(Timestamp::parse_iso8601("2019-12-11T23:32:47Z"), Some(base));
+    assert_eq!(Timestamp::parse_iso8601("2019-12-11T23:32:47.123456Z"), Some(base));
+    assert_eq!(Timestamp::parse_iso8601("2019-12-12T08:32:47+09:00"), Some(base));
+    assert_eq!(Timestamp::parse_iso8601("2019-12-11T18:02:47-05:30"), Some(base));
+}
+
+#[test]
+fn iso_8601_round_trips() {
+    let mut seconds = -3_000_000_000_i64;
+    while seconds < 7_000_000_000 {
+        let time = Timestamp(seconds);
+        assert_eq!(Timestamp::parse_iso8601(&time.iso8601()), Some(time), "{seconds}");
+        seconds += 86_399;
+    }
+}
+
+#[test]
+fn text_that_is_not_iso_8601_is_refused() {
+    for text in [
+        "",
+        "2019-12-11",
+        "2019-12-11T23:32:47",
+        "2019-12-11 23:32:47Z",
+        "20191211T233247Z",
+        "2019-12-11T23:32:47.Z",
+        "2019-12-11T23:32:47+0000",
+        "2019-12-11T23:32:47+24:00",
+        "2019-12-11T23:32:47+00:60",
+        "2019-13-11T23:32:47Z",
+        "2019-02-30T23:32:47Z",
+        "2019-12-11T24:00:00Z",
+        "2019-12-11T23:32:47Zjunk",
+        "２０１９-12-11T23:32:47Z",
+        "2019-12-11T23:32:4é+00:00",
+    ] {
+        assert_eq!(Timestamp::parse_iso8601(text), None, "{text:?}");
+    }
+}

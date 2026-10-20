@@ -81,4 +81,43 @@ impl Timestamp {
         }
         Some(Self(days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second))
     }
+
+    /// `YYYY-MM-DDTHH:MM:SS.000Z`, the form of `LastModified` and the other timestamps in S3 results.
+    pub fn iso8601(self) -> String {
+        let (year, month, day) = civil_from_days(self.0.div_euclid(86400));
+        let seconds = self.0.rem_euclid(86400);
+        format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z", seconds / 3600, seconds % 3600 / 60, seconds % 60)
+    }
+
+    /// Reads `YYYY-MM-DDTHH:MM:SS`, then optionally a fraction of a second (dropped), then `Z` or an offset `+HH:MM` or `-HH:MM`. Both the form of
+    /// the examples in the S3 documentation (`2019-12-11T23:32:47+00:00`) and the form S3 sends (`2009-10-12T17:50:30.000Z`) are read.
+    pub fn parse_iso8601(text: &str) -> Option<Self> {
+        let bytes = text.as_bytes();
+        if !text.is_ascii() || bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' || bytes[13] != b':' || bytes[16] != b':' {
+            return None;
+        }
+        let compact = format!("{}{}{}T{}{}{}Z", &text[0..4], &text[5..7], &text[8..10], &text[11..13], &text[14..16], &text[17..19]);
+        let base = Self::parse_amz_date(&compact)?;
+        let mut rest = &text[19..];
+        if let Some(fraction) = rest.strip_prefix('.') {
+            let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return None;
+            }
+            rest = &fraction[digits..];
+        }
+        match rest {
+            "Z" => Some(base),
+            offset if offset.len() == 6 && matches!(offset.as_bytes()[0], b'+' | b'-') && offset.as_bytes()[3] == b':' => {
+                let hours: i64 = offset[1..3].parse().ok()?;
+                let minutes: i64 = offset[4..6].parse().ok()?;
+                if hours > 23 || minutes > 59 {
+                    return None;
+                }
+                let shift = hours * 3600 + minutes * 60;
+                Some(Self(if offset.starts_with('+') { base.0 - shift } else { base.0 + shift }))
+            }
+            _ => None,
+        }
+    }
 }
