@@ -1,0 +1,55 @@
+# The client against a real S3-compatible service: RustFS, in a container.
+#
+# MinIO, which the project started out with in mind, no longer publishes container images (the minio/minio repository is gone from Docker Hub),
+# so a service that is still maintained is used. The tests of the client are in crates/thirtys3-client/tests/service.rs and end at once without
+# the THIRTYS3_TEST_* variables, so `cargo test` anywhere else does not need a service.
+name: Services
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: services-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rustfs:
+    name: Client against RustFS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      THIRTYS3_TEST_ENDPOINT: http://127.0.0.1:9000
+      THIRTYS3_TEST_BUCKET: thirtys3-test
+      THIRTYS3_TEST_ACCESS_KEY: thirtys3test
+      THIRTYS3_TEST_SECRET_KEY: thirtys3test-secret
+      THIRTYS3_TEST_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start RustFS
+        run: |
+          docker run -d --name rustfs -p 127.0.0.1:9000:9000 \
+            -e RUSTFS_ACCESS_KEY="$THIRTYS3_TEST_ACCESS_KEY" -e RUSTFS_SECRET_KEY="$THIRTYS3_TEST_SECRET_KEY" \
+            --tmpfs /data:rw,mode=1777 --tmpfs /logs:rw,mode=1777 \
+            rustfs/rustfs:1.0.3
+          curl --silent --fail --retry 60 --retry-connrefused --retry-delay 1 --output /dev/null http://127.0.0.1:9000/health
+      - name: Create the bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.THIRTYS3_TEST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.THIRTYS3_TEST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: aws --endpoint-url "$THIRTYS3_TEST_ENDPOINT" s3 mb "s3://$THIRTYS3_TEST_BUCKET"
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked -p thirtys3-client --test service -- --nocapture
+      - name: RustFS log
+        if: failure()
+        run: docker logs rustfs | tail -100

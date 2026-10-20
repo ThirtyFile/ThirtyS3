@@ -11,7 +11,34 @@ keywords = ["s3", "aws", "sigv4"]
 categories = ["network-programming"]
 
 [dependencies]
+bytes = "1.12.1"
+futures-util = "0.3.34"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "tls12", "rustls-platform-verifier"] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "tokio", "http1"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12"] }
+rustls-platform-verifier = "0.7.1"
 thirtys3-core.workspace = true
+thiserror = "2.0.21"
+tokio = { version = "1.54.0", features = ["net", "time", "rt", "macros", "io-util", "sync"] }
+tracing = "0.1.44"
+
+[features]
+# The cryptography provider of rustls for the TLS connections: one of the two
+default = ["aws-lc-rs"]
+aws-lc-rs = ["hyper-rustls/aws-lc-rs"]
+ring = ["hyper-rustls/ring"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+bytes = "1.12.1"
+futures-util = "0.3.34"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "http1", "client-legacy"] }
+tokio = { version = "1.54.0", features = ["full"] }
