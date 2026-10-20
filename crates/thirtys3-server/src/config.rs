@@ -31,6 +31,10 @@ pub struct ServerConfig {
     /// How long the service waits for the next piece of the body of an upload (or of a document) before it gives up with `RequestTimeout`. This
     /// guards against a client that opens a request and then sends nothing; the time to read the head of a request and the idle time of a
     /// connection are for the code that serves the connections. Default 30 seconds; `None` waits for ever.
+    ///
+    /// This is a time of silence, not a rate: a client that sends a byte every 29 seconds keeps its request, so a deployment that has to bound the
+    /// time of a request (or its rate) does it where it serves connections, or in a layer around the service. The timeout needs a Tokio runtime,
+    /// and the service does as a whole (it has no other use of Tokio than this timer, and `None` removes even that).
     pub body_idle_timeout: Option<std::time::Duration>,
 }
 

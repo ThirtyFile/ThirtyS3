@@ -5,6 +5,7 @@ use thirtys3_core::xml::XmlError;
 
 /// Why a call failed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The configuration cannot be used.
     #[error("invalid configuration: {0}")]
@@ -26,6 +27,10 @@ pub enum Error {
     /// The service could not be reached or the connection broke.
     #[error("could not reach the service: {0}")]
     Transport(String),
+    /// The TLS connection could not be made: the certificate is not trusted or does not match the host, or the other side does not speak TLS. Trying
+    /// again does not help.
+    #[error("TLS failed: {0}")]
+    Tls(String),
     /// Nothing came from the service for longer than the read timeout, or the connect timeout passed.
     #[error("timed out: {0}")]
     Timeout(String),
@@ -45,6 +50,7 @@ pub enum Error {
 
 /// What an [`Error`] means for the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// The object (or the bucket) does not exist.
     NotFound,
@@ -71,6 +77,7 @@ impl Error {
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::Config(_) | Self::InvalidInput(_) => ErrorKind::InvalidInput,
+            Self::Tls(_) => ErrorKind::Other,
             Self::Transport(_) | Self::Timeout(_) => ErrorKind::Unavailable,
             Self::ObjectChanged => ErrorKind::PreconditionFailed,
             Self::Service(error) => match (error.status, error.code.as_str()) {
@@ -79,6 +86,7 @@ impl Error {
                 (412, _) | (409, "ConditionalRequestConflict") => ErrorKind::PreconditionFailed,
                 (416, _) | (_, "InvalidRange") => ErrorKind::InvalidRange,
                 (401 | 403, _) | (_, "AccessDenied" | "InvalidAccessKeyId" | "SignatureDoesNotMatch" | "ExpiredToken") => ErrorKind::PermissionDenied,
+                (501, _) | (_, "NotImplemented") => ErrorKind::Rejected,
                 (500..=599 | 429, _) | (_, "SlowDown" | "RequestTimeout" | "InternalError" | "ServiceUnavailable") => ErrorKind::Unavailable,
                 (400..=499, _) => ErrorKind::Rejected,
                 _ => ErrorKind::Other,
@@ -89,6 +97,7 @@ impl Error {
                 304 => ErrorKind::NotModified,
                 412 => ErrorKind::PreconditionFailed,
                 416 => ErrorKind::InvalidRange,
+                501 => ErrorKind::Rejected,
                 408 | 429 | 500..=599 => ErrorKind::Unavailable,
                 400..=499 => ErrorKind::Rejected,
                 _ => ErrorKind::Other,

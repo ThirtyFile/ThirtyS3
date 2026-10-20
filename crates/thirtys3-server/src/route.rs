@@ -17,6 +17,7 @@ use crate::config::ServerConfig;
 
 /// An operation the service does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Op {
     /// `GET /`
     ListBuckets,
@@ -131,6 +132,14 @@ fn text(bytes: Vec<u8>, what: &str) -> Result<String, S3Error> {
     String::from_utf8(bytes).map_err(|_| S3Error::new("InvalidURI", format!("Couldn't parse the specified URI: the {what} is not valid UTF-8")))
 }
 
+/// The host a request was sent to: the `Host` header, or for a request that has none (HTTP/2 puts it in the authority of the URI) the authority.
+pub(crate) fn host_of(parts: &Parts) -> Option<String> {
+    match parts.headers.get(http::header::HOST).and_then(|host| host.to_str().ok()) {
+        Some(host) => Some(host.to_owned()),
+        None => parts.uri.authority().map(|authority| authority.as_str().to_owned()),
+    }
+}
+
 /// Works out the operation of a request.
 pub fn route(parts: &Parts, config: &ServerConfig) -> Result<Route, S3Error> {
     let query: Vec<(String, String)> = query_params(parts.uri.query().unwrap_or_default())
@@ -139,36 +148,42 @@ pub fn route(parts: &Parts, config: &ServerConfig) -> Result<Route, S3Error> {
         .collect();
 
     // The bucket from the host name, when the host is under one of the domains that are served in virtual-hosted style.
-    let host = parts
-        .headers
-        .get(http::header::HOST)
-        .and_then(|host| host.to_str().ok())
-        .map(|host| host.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(name, _)| name));
+    let host_name = host_of(parts);
+    let host = host_name.as_deref().map(|host| host.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(name, _)| name));
     let hosted_bucket = host.and_then(|host| {
-        let host = host.to_ascii_lowercase();
+        // A name may end with the dot of the root of the DNS, which names the same host.
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
         config
             .virtual_host_suffixes
             .iter()
             .find_map(|suffix| host.strip_suffix(&format!(".{}", suffix.to_ascii_lowercase())).filter(|bucket| !bucket.is_empty()).map(str::to_owned))
     });
 
-    let path = text(percent_decode(parts.uri.path(), false), "path")?;
-    let rest = path.strip_prefix('/').unwrap_or(&path);
+    // The bucket and the key are told apart in the path as it was sent, and decoded after: a `%2F` in the name of a bucket is not the end of it.
+    let raw = parts.uri.path();
+    let rest = raw.strip_prefix('/').unwrap_or(raw);
     let (bucket, key) = match hosted_bucket {
-        Some(bucket) => (Some(bucket), (!rest.is_empty()).then(|| rest.to_owned())),
+        Some(bucket) => (Some(bucket), (!rest.is_empty()).then(|| text(percent_decode(rest, false), "path")).transpose()?),
         None if rest.is_empty() => (None, None),
         None => match rest.split_once('/') {
-            Some((bucket, key)) => (Some(bucket.to_owned()), (!key.is_empty()).then(|| key.to_owned())),
-            None => (Some(rest.to_owned()), None),
+            Some((bucket, key)) => {
+                (Some(text(percent_decode(bucket, false), "path")?), (!key.is_empty()).then(|| text(percent_decode(key, false), "path")).transpose()?)
+            }
+            None => (Some(text(percent_decode(rest, false), "path")?), None),
         },
     };
-    if bucket.as_deref() == Some("") {
+    if let Some(bucket) = &bucket
+        && (bucket.is_empty() || bucket == "." || bucket == ".." || bucket.len() > 255 || bucket.chars().any(|c| c.is_control() || c == '\\'))
+    {
         return Err(S3Error::new(code::INVALID_BUCKET_NAME, "The specified bucket is not valid."));
     }
-    if let Some(key) = &key
-        && key.len() > 1024
-    {
-        return Err(S3Error::new(code::KEY_TOO_LONG, "Your key is too long").with_detail("MaxSizeAllowed", "1024").with_detail("Size", key.len().to_string()));
+    if let Some(key) = &key {
+        if key.len() > 1024 {
+            return Err(S3Error::new(code::KEY_TOO_LONG, "Your key is too long").with_detail("MaxSizeAllowed", "1024").with_detail("Size", key.len().to_string()));
+        }
+        if key.contains('\0') {
+            return Err(S3Error::new("InvalidURI", "Couldn't parse the specified URI: the key has a NUL character"));
+        }
     }
 
     let mut route = Route { op: Op::ListBuckets, bucket, key, query };

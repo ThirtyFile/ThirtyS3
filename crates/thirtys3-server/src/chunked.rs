@@ -39,6 +39,7 @@ fn wrong(message: impl Into<String>) -> DecodeError {
 
 /// A piece of a decoded body.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// A chunk begins. `size` bytes of data follow in [`Event::Data`] events; the chunk of size 0 ends the data. `signature` is the
     /// `chunk-signature` of a signed body.

@@ -43,7 +43,8 @@ async fn the_entries_have_what_a_listing_has() {
     assert_eq!((listed.key.as_str(), listed.size), ("file.txt", 8));
     assert_eq!(listed.etag, server.object("file.txt").map(|object| object.etag));
     assert!(listed.last_modified.is_some());
-    assert_eq!(listed.storage_class.as_deref(), Some("STANDARD"));
+    // STANDARD is `None`, as it is for `head`.
+    assert_eq!(listed.storage_class, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]

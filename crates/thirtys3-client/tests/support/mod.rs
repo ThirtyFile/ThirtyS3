@@ -72,6 +72,12 @@ pub enum Fault {
     IgnoreRange,
     /// The bytes of the body of a `GET` are sent one at a time with this wait between them, so the client sees a stalled download.
     Stall(Duration),
+    /// The body of a `GET` is sent in pieces of this many bytes with this wait between them, which is a download that goes on steadily and slowly, and
+    /// the connection breaks after this many bytes of it.
+    Paced(usize, Duration, usize),
+    /// The request is carried out as it should be, and then the connection is closed without an answer: the service did it and the client does not
+    /// know.
+    ApplyThenDrop,
 }
 
 #[derive(Clone, Default)]
@@ -79,6 +85,8 @@ pub struct Rule {
     pub method: Option<Method>,
     pub path_contains: Option<String>,
     pub query_contains: Option<String>,
+    /// How many matching requests go by before it begins to apply.
+    pub skip: usize,
     /// How many requests it applies to; 0 is none left.
     pub remaining: usize,
     pub fault: Option<Fault>,
@@ -174,10 +182,16 @@ impl TestServer {
 
     /// Makes the next `times` requests that match behave badly.
     pub fn fault(&self, method: Option<Method>, path_contains: Option<&str>, query_contains: Option<&str>, times: usize, fault: Fault) {
+        self.fault_after(0, method, path_contains, query_contains, times, fault);
+    }
+
+    /// Makes `times` requests that match behave badly, after `skip` of them have gone by.
+    pub fn fault_after(&self, skip: usize, method: Option<Method>, path_contains: Option<&str>, query_contains: Option<&str>, times: usize, fault: Fault) {
         self.state.lock().unwrap().rules.push(Rule {
             method,
             path_contains: path_contains.map(str::to_owned),
             query_contains: query_contains.map(str::to_owned),
+            skip,
             remaining: times,
             fault: Some(fault),
         });
@@ -282,7 +296,9 @@ async fn handle(state: Arc<Mutex<State>>, request: hyper::Request<Incoming>) -> 
                 && rule.method.as_ref().is_none_or(|method| *method == parts.method)
                 && rule.path_contains.as_deref().is_none_or(|text| path.contains(text))
                 && rule.query_contains.as_deref().is_none_or(|text| query.contains(text));
-            if matches {
+            if matches && rule.skip > 0 {
+                rule.skip -= 1;
+            } else if matches {
                 rule.remaining -= 1;
                 found = rule.fault.clone();
                 break;
@@ -326,6 +342,9 @@ async fn handle(state: Arc<Mutex<State>>, request: hyper::Request<Incoming>) -> 
         return Ok(response);
     }
     let mut response = route(&state, &parts.method, &path, &query, &parts.headers, body, &fault);
+    if matches!(fault, Some(Fault::ApplyThenDrop)) {
+        return Err(io::Error::other("dropped after the request was carried out"));
+    }
     response.headers_mut().insert("date", HeaderValue::from_str(&now.http_date()).unwrap());
     Ok(response)
 }
@@ -529,6 +548,19 @@ fn get(state: &State, method: &Method, key: &str, headers: &HeaderMap, fault: &O
                 Err(io::Error::other("cut on purpose"))
             }));
             BodyExt::boxed(StreamBody::new(frames))
+        }
+        Some(Fault::Paced(piece, wait, after)) if *after < data.len() => {
+            let (piece, wait, after) = (*piece, *wait, *after);
+            let pieces: Vec<Bytes> = (0..after).step_by(piece).map(|at| data.slice(at..(at + piece).min(after))).collect();
+            let frames = stream::iter(pieces).then(move |piece| async move {
+                tokio::time::sleep(wait).await;
+                Ok(Frame::data(piece))
+            });
+            let broken = stream::once(async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Err(io::Error::other("cut on purpose"))
+            });
+            BodyExt::boxed(StreamBody::new(frames.chain(broken)))
         }
         Some(Fault::Stall(_)) if !data.is_empty() => {
             let first = data.slice(..1);

@@ -20,6 +20,7 @@ use xxhash_rust::xxh64::Xxh64;
 
 /// A checksum algorithm S3 knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum ChecksumAlgorithm {
     /// CRC-32 (`CRC32`), 4 bytes.
     Crc32,

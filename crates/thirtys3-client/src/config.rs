@@ -14,6 +14,7 @@ use crate::error::Error;
 
 /// Where the bucket is in the address of a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Addressing {
     /// Virtual-hosted style (the bucket is in the host name) for the endpoint of AWS, and path-style for an endpoint that was given, because
     /// services such as MinIO and most S3-compatible gateways are reached that way. Either way a bucket with a `.` in its name and an

@@ -30,6 +30,10 @@ pub struct Watched {
     pub fail_complete: Arc<AtomicBool>,
     /// `delete_objects` leaves the last result out.
     pub short_delete_results: Arc<AtomicBool>,
+    /// Buckets whose objects the access keys may not read.
+    pub unreadable: Arc<Mutex<HashSet<String>>>,
+    /// `copy_object` is given no conditions on the source, as a backend that leaves them to the service.
+    pub forget_source_conditions: Arc<AtomicBool>,
 }
 
 impl Watched {
@@ -43,6 +47,8 @@ impl Watched {
             undeletable: Arc::default(),
             fail_complete: Arc::default(),
             short_delete_results: Arc::default(),
+            unreadable: Arc::default(),
+            forget_source_conditions: Arc::default(),
             token: Arc::default(),
         }
     }
@@ -80,6 +86,7 @@ impl Backend for Watched {
     }
 
     async fn list_buckets(&self, ctx: &Ctx<'_>, request: ListBucketsRequest) -> Result<ListBucketsOutput, S3Error> {
+        self.note(format!("list_buckets:{:?}", request.max_buckets));
         self.inner.list_buckets(ctx, request).await
     }
 
@@ -88,10 +95,17 @@ impl Backend for Watched {
     }
 
     async fn get_object(&self, ctx: &Ctx<'_>, bucket: &str, key: &str) -> Result<ObjectData, S3Error> {
+        if self.unreadable.lock().unwrap().contains(bucket) {
+            return Err(S3Error::new("AccessDenied", "Access Denied"));
+        }
         self.inner.get_object(ctx, bucket, key).await
     }
 
     async fn head_object(&self, ctx: &Ctx<'_>, bucket: &str, key: &str) -> Result<ObjectInfo, S3Error> {
+        self.note(format!("head:{bucket}/{key}"));
+        if self.unreadable.lock().unwrap().contains(bucket) {
+            return Err(S3Error::new("AccessDenied", "Access Denied"));
+        }
         self.inner.head_object(ctx, bucket, key).await
     }
 
@@ -106,7 +120,11 @@ impl Backend for Watched {
         result
     }
 
-    async fn copy_object(&self, ctx: &Ctx<'_>, request: CopyObjectRequest) -> Result<CopyObjectOutput, S3Error> {
+    async fn copy_object(&self, ctx: &Ctx<'_>, mut request: CopyObjectRequest) -> Result<CopyObjectOutput, S3Error> {
+        self.note(format!("copy:{}/{}", request.source_bucket, request.source_key));
+        if self.forget_source_conditions.load(Ordering::Relaxed) {
+            request.source_conditions = Default::default();
+        }
         self.inner.copy_object(ctx, request).await
     }
 
@@ -145,6 +163,7 @@ impl Backend for Watched {
     }
 
     async fn complete_multipart_upload(&self, ctx: &Ctx<'_>, request: CompleteMultipartUploadRequest) -> Result<CompleteMultipartUploadOutput, S3Error> {
+        self.note("complete");
         if self.fail_complete.load(Ordering::Relaxed) {
             return Err(S3Error::new("InternalError", "We encountered an internal error. Please try again."));
         }

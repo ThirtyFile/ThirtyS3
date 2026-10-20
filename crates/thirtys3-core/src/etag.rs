@@ -48,6 +48,7 @@ pub struct EntityTag {
 
 /// The value of an `If-Match` or `If-None-Match` header: `*` or a list of entity tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ETagCondition {
     /// `*`: any current version.
     Any,

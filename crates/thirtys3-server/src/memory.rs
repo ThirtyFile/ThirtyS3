@@ -170,8 +170,8 @@ struct Slice(Bytes);
 impl ObjectSource for Slice {
     async fn open(self: Box<Self>, range: Range<u64>) -> Result<ByteStream, S3Error> {
         let data = self.0.slice(range.start as usize..range.end as usize);
-        // In pieces, as a file would come.
-        let pieces: Vec<Result<Bytes, std::io::Error>> = data.chunks(64 * 1024).map(|piece| Ok(Bytes::copy_from_slice(piece))).collect();
+        // In pieces, as a file would come; they share the memory of the object and copy nothing.
+        let pieces: Vec<Result<Bytes, std::io::Error>> = (0..data.len()).step_by(64 * 1024).map(|at| Ok(data.slice(at..(at + 64 * 1024).min(data.len())))).collect();
         Ok(futures_util::stream::iter(pieces).boxed())
     }
 }
@@ -189,7 +189,12 @@ impl Backend for MemoryBackend {
     }
 
     async fn after_authentication(&self, info: &AuthInfo<'_>, outcome: AuthOutcome) {
-        self.auth_log.lock().unwrap().push((info.access_key.to_owned(), outcome));
+        let mut log = self.auth_log.lock().unwrap();
+        // The newest 10,000: a record for tests, not a log that can fill the memory.
+        if log.len() >= 10_000 {
+            log.remove(0);
+        }
+        log.push((info.access_key.to_owned(), outcome));
     }
 
     async fn list_buckets(&self, ctx: &Ctx<'_>, request: ListBucketsRequest) -> Result<ListBucketsOutput, S3Error> {
@@ -422,7 +427,8 @@ impl Backend for MemoryBackend {
                 checksums: Default::default(),
             })
             .collect();
-        let truncated = parts.len() > request.max_parts as usize;
+        // No parts asked for is no parts, and not a listing that is cut off with nowhere to go on from.
+        let truncated = request.max_parts > 0 && parts.len() > request.max_parts as usize;
         parts.truncate(request.max_parts as usize);
         let next = parts.last().map(|part| part.part_number).filter(|_| truncated);
         Ok(ListPartsOutput { parts, truncated, next_part_number_marker: next, storage_class: Some("STANDARD".to_owned()), ..ListPartsOutput::default() })
@@ -438,7 +444,13 @@ impl Backend for MemoryBackend {
         let mut output = ListUploadsOutput::default();
         let mut last = (String::new(), String::new());
         for (id, upload) in candidates {
-            if (upload.key.as_str(), id.as_str()) <= (request.key_marker.as_str(), request.upload_id_marker.as_str()) && !request.key_marker.is_empty() {
+            // After the key marker; and when there is an upload ID marker as well, an upload of the key of the marker is after it if its ID is.
+            let before_marker = if request.upload_id_marker.is_empty() {
+                upload.key.as_str() <= request.key_marker.as_str()
+            } else {
+                (upload.key.as_str(), id.as_str()) <= (request.key_marker.as_str(), request.upload_id_marker.as_str())
+            };
+            if before_marker && !request.key_marker.is_empty() {
                 continue;
             }
             let group = group_of(&upload.key, &request.prefix, delimiter);

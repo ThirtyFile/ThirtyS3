@@ -15,6 +15,7 @@ use thirtys3_core::{S3Error, Timestamp};
 
 /// What the conditions of a request say about the object they are for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Outcome {
     /// Go on.
     Proceed,
@@ -116,7 +117,12 @@ pub enum RangeSpec {
 /// Reads a `Range` header. `None` for a value that is not a single `bytes` range: S3 does not do several ranges, and answers a request with a
 /// `Range` it cannot read with the whole object.
 pub fn parse_range(value: &str) -> Option<RangeSpec> {
-    let spec = value.trim().strip_prefix("bytes=")?.trim();
+    // The unit is not case sensitive (RFC 9110, section 14.1).
+    let (unit, spec) = value.trim().split_once('=')?;
+    if !unit.trim().eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let spec = spec.trim();
     if spec.contains(',') {
         return None;
     }

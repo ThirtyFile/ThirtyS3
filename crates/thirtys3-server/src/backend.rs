@@ -5,7 +5,20 @@
 //! [`S3Error`]s, and never sees a signature or a line of XML.
 //!
 //! Every method gets a [`Ctx`] with the access key that was authenticated. Whether that key may do this to this bucket and key is for the backend
-//! to decide, on every call.
+//! to decide, on every call. That goes for the source of a copy too, which the service reads with [`Backend::head_object`] before it asks for the
+//! copy, so a backend that checks the rights of `head_object` has checked those of the source.
+//!
+//! # What a backend must be ready for
+//!
+//! - **A request can be dropped at any `.await`.** When a client goes away, the future that is answering it is dropped, wherever it is: in the hooks
+//!   of the authentication, in a `copy_object`, in a `complete_multipart_upload`. A method that changes something should either do it in one step or
+//!   leave things so that a half-done call can be told and cleaned up. [`Backend::after_authentication`] is not called for a request that is dropped
+//!   before the authentication is over, so a limit on attempts must not hold anything it needs that call to give back.
+//! - **An upload is good only if its body ended with `None`.** The body of [`put_object`](Backend::put_object) and
+//!   [`upload_part`](Backend::upload_part) is a stream of `Result`s: when a check fails (a digest, a signature, the length) the stream gives an `Err`
+//!   and then ends, so a loop that stops at the first `Err` and treats the stop as the end (`while let Some(Ok(piece)) = body.next().await`) keeps
+//!   an upload that was cut short or changed. Read it with `?` on every piece (`TryStreamExt::try_next`), write to a place that is not yet the object,
+//!   and make it the object only after the last `None` and with an `Ok`.
 
 use std::ops::Range;
 use std::pin::Pin;
@@ -25,8 +38,8 @@ use crate::conditions::Conditions;
 /// A stream of data of an object.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
-/// The secret of an access key.
-#[derive(Clone, PartialEq, Eq)]
+/// The secret of an access key. There is no `PartialEq`: secrets are compared with [`thirtys3_core::constant_time_eq`].
+#[derive(Clone)]
 pub struct Credential {
     /// The secret access key.
     pub secret_access_key: String,
@@ -47,8 +60,8 @@ impl std::fmt::Debug for Credential {
     }
 }
 
-/// What the backend is told about a request that is being authenticated.
-#[derive(Debug, Clone, Copy)]
+/// What the backend is told about a request that is being authenticated. `Debug` leaves out the signature and the token of the request.
+#[derive(Clone, Copy)]
 pub struct AuthInfo<'a> {
     /// The access key ID the request names. It has not been checked yet.
     pub access_key: &'a str,
@@ -62,6 +75,7 @@ pub struct AuthInfo<'a> {
 
 /// How an authentication ended, for the limits on sign-in attempts a backend may keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuthOutcome {
     /// The signature is right.
     Verified,
@@ -75,8 +89,8 @@ pub enum AuthOutcome {
     Failed,
 }
 
-/// What is known about the request an operation is for.
-#[derive(Debug, Clone, Copy)]
+/// What is known about the request an operation is for. `Debug` leaves out the signature and the token of the request.
+#[derive(Clone, Copy)]
 pub struct Ctx<'a> {
     /// The access key that signed the request, whose signature was right.
     pub access_key: &'a str,
@@ -94,6 +108,65 @@ pub struct Ctx<'a> {
     pub headers: &'a HeaderMap,
     /// What the code that mounted the service put in the extensions of the request.
     pub extensions: &'a Extensions,
+}
+
+/// The headers of a request for `Debug`, without the ones that hold a secret.
+struct RedactedHeaders<'a>(&'a HeaderMap);
+
+impl std::fmt::Debug for RedactedHeaders<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = f.debug_map();
+        for (name, value) in self.0 {
+            let secret = matches!(name.as_str(), "authorization" | "proxy-authorization" | "cookie" | "x-amz-security-token");
+            if secret {
+                map.entry(&name.as_str(), &"<redacted>");
+            } else {
+                map.entry(&name.as_str(), value);
+            }
+        }
+        map.finish()
+    }
+}
+
+/// The URI of a request for `Debug`: the signature and the token of a presigned URL are left out, because whoever has them can use the URL.
+struct RedactedUri<'a>(&'a Uri);
+
+impl std::fmt::Debug for RedactedUri<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(query) = self.0.query() else { return write!(f, "{}", self.0.path()) };
+        let pairs: Vec<String> = query
+            .split('&')
+            .map(|pair| match pair.split_once('=') {
+                Some((name, _)) if matches!(name, "X-Amz-Signature" | "X-Amz-Security-Token") => format!("{name}=<redacted>"),
+                _ => pair.to_owned(),
+            })
+            .collect();
+        write!(f, "{}?{}", self.0.path(), pairs.join("&"))
+    }
+}
+
+impl std::fmt::Debug for AuthInfo<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthInfo")
+            .field("access_key", &self.access_key)
+            .field("uri", &RedactedUri(self.uri))
+            .field("headers", &RedactedHeaders(self.headers))
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for Ctx<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ctx")
+            .field("access_key", &self.access_key)
+            .field("request_id", &self.request_id)
+            .field("presigned", &self.presigned)
+            .field("region", &self.region)
+            .field("method", &self.method)
+            .field("uri", &RedactedUri(self.uri))
+            .field("headers", &RedactedHeaders(self.headers))
+            .finish_non_exhaustive()
+    }
 }
 
 /// What is known about an object.
@@ -153,6 +226,7 @@ pub struct ObjectData {
 /// same step, so that two writes cannot both succeed: the lock file that is made once, the object that is replaced only if it is still the one
 /// that was read. A write that does not hold fails with `PreconditionFailed`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum WriteCondition {
     /// Nothing is expected.
     #[default]
@@ -163,7 +237,8 @@ pub enum WriteCondition {
     Match(ETagCondition),
 }
 
-/// `PutObject`.
+/// `PutObject`. The other headers a client may set for the object (`Content-Disposition`, `Cache-Control`, `Content-Encoding`, `Content-Language`,
+/// `Expires`) are not fields: a backend that keeps them reads them from [`Ctx::headers`] and gives them back in [`ObjectInfo::headers`].
 #[derive(Debug)]
 pub struct PutObjectRequest {
     /// The bucket.
@@ -210,8 +285,9 @@ pub struct CopyObjectRequest {
     pub content_type: Option<String>,
     /// The user metadata, with `replace_metadata`.
     pub metadata: Vec<(String, String)>,
-    /// The conditions on the source (`x-amz-copy-source-if-*`). They are for the backend to evaluate against the source with
-    /// [`Conditions::evaluate_copy`](crate::conditions::Conditions::evaluate_copy), because only it has the source.
+    /// The conditions on the source (`x-amz-copy-source-if-*`). The service has checked them against the source it read with
+    /// [`Backend::head_object`]; a backend that copies something that may have changed since can check them again with
+    /// [`Conditions::evaluate_copy`](crate::conditions::Conditions::evaluate_copy).
     pub source_conditions: Conditions,
     /// What to expect at the new key.
     pub condition: WriteCondition,
@@ -239,6 +315,7 @@ pub struct DeleteTarget {
 
 /// Where a listing starts.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ListStart {
     /// At the first key.
     #[default]
@@ -457,7 +534,8 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Called before the key of a request is looked up, once the request has been read and its time checked. An error is the answer to the
     /// request: this is where a limit on sign-in attempts is applied (`SlowDown`) and an attempt reserved. If it returns `Ok`,
-    /// [`after_authentication`](Self::after_authentication) will be called exactly once.
+    /// [`after_authentication`](Self::after_authentication) will be called once, unless the request is dropped before the authentication is over (the
+    /// client went away).
     async fn before_authentication(&self, _info: &AuthInfo<'_>) -> Result<(), S3Error> {
         Ok(())
     }
@@ -482,7 +560,9 @@ pub trait Backend: Send + Sync + 'static {
     /// `PutObject`. Read the body to its end, and only keep the object if the end came without an error.
     async fn put_object(&self, ctx: &Ctx<'_>, request: PutObjectRequest) -> Result<PutObjectOutput, S3Error>;
 
-    /// `CopyObject`.
+    /// `CopyObject`. The service has already read the source with [`head_object`](Self::head_object), which is where a backend refuses a source its
+    /// key may not read, and has checked the conditions on the source against what that said (`source_conditions` is passed on for a backend that
+    /// wants to check them again, against the data it is about to copy).
     async fn copy_object(&self, ctx: &Ctx<'_>, request: CopyObjectRequest) -> Result<CopyObjectOutput, S3Error>;
 
     /// `DeleteObject`. An object that is not there is deleted: `Ok`.

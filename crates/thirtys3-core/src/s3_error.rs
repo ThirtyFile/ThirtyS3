@@ -205,7 +205,10 @@ pub fn status_of(code: &str) -> Option<u16> {
 }
 
 /// An error response of S3.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` leaves out the details that echo what was signed (`CanonicalRequest`, `StringToSign` and the like), because they carry the headers of the
+/// request, among them the session token.
+#[derive(Clone, PartialEq, Eq)]
 pub struct S3Error {
     /// The error code, such as `NoSuchKey`. It identifies the condition for programs.
     pub code: String,
@@ -300,7 +303,7 @@ impl S3Error {
     /// Whether trying the same request again can work: the server was busy or failed (a 500, 502, 503 or 504, and the codes of throttling and
     /// time-outs), as opposed to a request that is wrong and will be wrong again.
     pub fn is_retryable(&self) -> bool {
-        matches!(self.status, 500 | 502 | 503 | 504)
+        matches!(self.status, 408 | 429 | 500 | 502 | 503 | 504)
             || matches!(
                 self.code.as_str(),
                 "SlowDown"
@@ -312,6 +315,28 @@ impl S3Error {
                     | "RequestThrottled"
                     | "RequestLimitExceeded"
             )
+    }
+}
+
+/// The details of an error that repeat what was signed, which can hold the headers of the request.
+const SIGNED_DETAILS: [&str; 5] = ["CanonicalRequest", "CanonicalRequestBytes", "StringToSign", "StringToSignBytes", "SignatureProvided"];
+
+impl std::fmt::Debug for S3Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let details: Vec<(&str, &str)> = self
+            .details
+            .iter()
+            .map(|(name, value)| (name.as_str(), if SIGNED_DETAILS.iter().any(|secret| name.eq_ignore_ascii_case(secret)) { "<redacted>" } else { value.as_str() }))
+            .collect();
+        f.debug_struct("S3Error")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("status", &self.status)
+            .field("resource", &self.resource)
+            .field("request_id", &self.request_id)
+            .field("host_id", &self.host_id)
+            .field("details", &details)
+            .finish()
     }
 }
 

@@ -93,6 +93,18 @@ pub(crate) fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a 
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
+/// The text of a header that may be there: `Err` when it is there and is not text, which is not the same as being absent (a check whose header cannot
+/// be read must not be skipped).
+pub(crate) fn header_checked<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, S3Error> {
+    match headers.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .to_str()
+            .map(Some)
+            .map_err(|_| S3Error::new(code::INVALID_ARGUMENT, format!("The header {name} is not text.")).with_detail("ArgumentName", name.to_owned())),
+    }
+}
+
 fn failed(error: S3Error) -> Response<ResponseBody> {
     let status = StatusCode::from_u16(error.status).ok().filter(|status| status.as_u16() >= 300).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut response = xml_response(error.to_xml());
@@ -180,8 +192,14 @@ impl<B: Backend> S3Service<B> {
 
     /// Checks who sent the request. Anonymous requests are never accepted.
     async fn authenticate(&self, parts: &Parts) -> Result<Authenticated, S3Error> {
-        let owned: Vec<(String, String)> =
+        let mut owned: Vec<(String, String)> =
             parts.headers.iter().map(|(name, value)| (name.as_str().to_owned(), String::from_utf8_lossy(value.as_bytes()).into_owned())).collect();
+        // A request over HTTP/2 has no `Host` header and the host in the authority of the URI, which is what a client signs as `host`.
+        if !parts.headers.contains_key(http::header::HOST)
+            && let Some(host) = route::host_of(parts)
+        {
+            owned.push(("host".to_owned(), host));
+        }
         let borrowed: Vec<(&str, &str)> = owned.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
         let request = SigRequest { method: parts.method.as_str(), path: parts.uri.path(), query: parts.uri.query().unwrap_or_default(), headers: &borrowed };
         let parsed = parse_request_auth(&request).map_err(|error| S3Error::from(&error))?.ok_or_else(|| S3Error::new(code::ACCESS_DENIED, "Access Denied"))?;
@@ -208,17 +226,8 @@ impl<B: Backend> S3Service<B> {
                 return Err(error);
             }
         };
-        if let Some(expected) = &credential.session_token
-            && parsed.session_token.as_ref() != Some(expected)
-        {
-            backend.after_authentication(&info, AuthOutcome::Failed).await;
-            return Err(S3Error::new("InvalidToken", "The provided token is malformed or otherwise invalid."));
-        }
-        match parsed.verify(&request, &credential.secret_access_key, now) {
-            Ok(verified) => {
-                backend.after_authentication(&info, AuthOutcome::Verified).await;
-                Ok(Authenticated { access_key: parsed.access_key_id.clone(), verified, presigned: parsed.kind == thirtys3_core::AuthKind::Query })
-            }
+        let verified = match parsed.verify(&request, &credential.secret_access_key, now) {
+            Ok(verified) => verified,
             Err(error) => {
                 let outcome = if error == SigError::SignatureDoesNotMatch { AuthOutcome::BadSignature } else { AuthOutcome::Failed };
                 backend.after_authentication(&info, outcome).await;
@@ -226,9 +235,19 @@ impl<B: Backend> S3Service<B> {
                 if outcome == AuthOutcome::BadSignature {
                     error = error.with_detail("AWSAccessKeyId", parsed.access_key_id.clone());
                 }
-                Err(error)
+                return Err(error);
             }
+        };
+        // The token of temporary credentials is checked once the signature has proved that the sender has the secret: before that, an answer about the
+        // token would tell someone who has only the access key ID whether a guess at it is right, and would not be counted as a wrong guess.
+        if let Some(expected) = &credential.session_token
+            && !parsed.session_token.as_ref().is_some_and(|token| thirtys3_core::constant_time_eq(token.as_bytes(), expected.as_bytes()))
+        {
+            backend.after_authentication(&info, AuthOutcome::Failed).await;
+            return Err(S3Error::new("InvalidToken", "The provided token is malformed or otherwise invalid."));
         }
+        backend.after_authentication(&info, AuthOutcome::Verified).await;
+        Ok(Authenticated { access_key: parsed.access_key_id.clone(), verified, presigned: parsed.kind == thirtys3_core::AuthKind::Query })
     }
 
     /// The checks for the body of a request that stores something: how its data comes, how long it is, and what it has to hash to.
@@ -244,15 +263,19 @@ impl<B: Backend> S3Service<B> {
                 (Framing::Chunked { signed: Some(chain), trailers }, None)
             }
             PayloadHash::StreamingUnsignedTrailer => (Framing::Chunked { signed: None, trailers: true }, None),
+            _ => return Err(S3Error::new(code::NOT_IMPLEMENTED, "This way of sending the payload is not supported.")),
         };
         let chunked = matches!(framing, Framing::Chunked { .. });
         let number = |name: &str| -> Result<Option<u64>, S3Error> {
-            match header_text(headers, name) {
+            match header_checked(headers, name)? {
                 None => Ok(None),
                 Some(text) => text.trim().parse::<u64>().map(Some).map_err(|_| invalid(format!("the header {name} is not a number"))),
             }
         };
         let length = if chunked { number("x-amz-decoded-content-length")? } else { number("content-length")? };
+        if chunked && length.is_none() {
+            return Err(S3Error::new(code::MISSING_CONTENT_LENGTH, "You must provide the x-amz-decoded-content-length HTTP header."));
+        }
         if let Some(length) = length
             && length > max_size
         {
@@ -260,7 +283,7 @@ impl<B: Backend> S3Service<B> {
                 .with_detail("ProposedSize", length.to_string())
                 .with_detail("MaxSizeAllowed", max_size.to_string()));
         }
-        let content_md5 = match header_text(headers, "content-md5") {
+        let content_md5 = match header_checked(headers, "content-md5")? {
             None => None,
             Some(text) => Some(
                 base64_decode(text)
@@ -270,7 +293,7 @@ impl<B: Backend> S3Service<B> {
         };
         let mut checksums = Vec::new();
         for algorithm in ChecksumAlgorithm::ALL {
-            if let Some(text) = header_text(headers, algorithm.header_name()) {
+            if let Some(text) = header_checked(headers, algorithm.header_name())? {
                 let digest = algorithm
                     .decode_value(text)
                     .ok_or_else(|| S3Error::new(code::INVALID_REQUEST, format!("The value of {} is not valid.", algorithm.header_name())))?;
@@ -278,7 +301,7 @@ impl<B: Backend> S3Service<B> {
             }
         }
         let mut trailer_checksums = Vec::new();
-        if let Some(text) = header_text(headers, "x-amz-trailer") {
+        if let Some(text) = header_checked(headers, "x-amz-trailer")? {
             for name in text.split(',').map(str::trim).filter(|name| !name.is_empty()) {
                 match ChecksumAlgorithm::from_header_name(name) {
                     Some(algorithm) => trailer_checksums.push(algorithm),

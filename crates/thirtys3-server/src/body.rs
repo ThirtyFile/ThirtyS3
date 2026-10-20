@@ -50,6 +50,7 @@ impl Digests {
 
 /// How the data of a body comes.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Framing {
     /// As it is.
     Plain,
@@ -107,6 +108,10 @@ struct State {
     /// The hash of the data of the chunk being read, for a signed body, and the signature it has to match.
     chunk: Option<(Hasher, String)>,
     size: u64,
+    /// Everything the framing of the body said has come and was checked; what is left is for the connection's body to end.
+    ended: bool,
+    /// The digests, worked out when the framing ended and published when the whole body has ended, with nothing after the end.
+    pending: Option<Digests>,
     finished: bool,
     failed: bool,
     digests: Arc<OnceLock<Digests>>,
@@ -128,6 +133,14 @@ impl State {
 
     fn count(&mut self, length: usize) -> Result<(), S3Error> {
         self.size += length as u64;
+        // More than was said it would be is known at once: a body does not run on to the size limit for the length to be found wrong at its end.
+        if let Some(declared) = self.plan_length
+            && self.size > declared
+        {
+            return Err(S3Error::new(code::INCOMPLETE_BODY, "You provided more bytes than the length specified in the request.")
+                .with_detail("NumberBytesExpected", declared.to_string())
+                .with_detail("NumberBytesProvided", self.size.to_string()));
+        }
         if self.size > self.max_size {
             return Err(S3Error::new(code::ENTITY_TOO_LARGE, "Your proposed upload exceeds the maximum allowed size")
                 .with_detail("MaxSizeAllowed", self.max_size.to_string()));
@@ -135,8 +148,8 @@ impl State {
         Ok(())
     }
 
-    /// Checks what can only be checked at the end, and keeps the digests.
-    fn finish(&mut self, trailer: Option<Vec<(String, String)>>) -> Result<(), S3Error> {
+    /// Checks what can only be checked at the end, and works out the digests.
+    fn finish(&mut self, trailer: Option<Vec<(String, String)>>) -> Result<Digests, S3Error> {
         if let Some(declared) = self.plan_length
             && declared != self.size
         {
@@ -181,13 +194,12 @@ impl State {
         if let Some(missing) = self.trailer_checksums.iter().find(|algorithm| !seen.contains(algorithm)) {
             return Err(malformed_trailer(&format!("{} was announced in x-amz-trailer and did not come", missing.header_name())));
         }
-        let _ = self.digests.set(Digests {
+        Ok(Digests {
             size: self.size,
             md5: md5.try_into().expect("MD5 is 16 bytes"),
             sha256: sha256.map(|digest| digest.try_into().expect("SHA-256 is 32 bytes")),
             checksums: computed,
-        });
-        Ok(())
+        })
     }
 
     /// The next piece, `None` at the end.
@@ -195,6 +207,20 @@ impl State {
         loop {
             if self.finished {
                 return Ok(None);
+            }
+            if self.ended {
+                // The framing is over. Nothing may follow it, in what has been read or in what is still to come, and only when the body has ended
+                // without anything after the end is it good.
+                if let Some(decoder) = &self.decoder {
+                    decoder.finish().map_err(|error| decode_error(&error))?;
+                }
+                if self.inner_done {
+                    if let Some(digests) = self.pending.take() {
+                        let _ = self.digests.set(digests);
+                    }
+                    self.finished = true;
+                    continue;
+                }
             }
             if let Some(decoder) = &mut self.decoder {
                 match decoder.next_event().map_err(|error| decode_error(&error))? {
@@ -236,13 +262,13 @@ impl State {
                                 .verify_trailer(&hash, &signature.ok_or_else(|| malformed_trailer("the trailing headers have no x-amz-trailer-signature"))?)
                                 .map_err(chunk_signature_error)?;
                         }
-                        self.finish(Some(headers))?;
-                        self.finished = true;
+                        self.pending = Some(self.finish(Some(headers))?);
+                        self.ended = true;
                         continue;
                     }
                     Some(Event::End) => {
-                        self.finish(None)?;
-                        self.finished = true;
+                        self.pending = Some(self.finish(None)?);
+                        self.ended = true;
                         continue;
                     }
                     None => {}
@@ -252,13 +278,13 @@ impl State {
                 match &self.decoder {
                     Some(decoder) => decoder.finish().map_err(|error| decode_error(&error))?,
                     None => {
-                        self.finish(None)?;
-                        self.finished = true;
+                        self.pending = Some(self.finish(None)?);
+                        self.ended = true;
                         continue;
                     }
                 }
-                // finish() succeeded: the decoder was done, and the end was already seen.
-                self.finished = true;
+                // The decoder is done, so the end of the framing was seen and `ended` is set: the next turn publishes the digests.
+                debug_assert!(self.ended);
                 continue;
             }
             let frame = match self.idle_timeout {
@@ -348,6 +374,8 @@ impl RequestBody {
             checksum_hashers: algorithms.into_iter().map(ChecksumAlgorithm::hasher).collect(),
             chunk: None,
             size: 0,
+            ended: false,
+            pending: None,
             finished: false,
             failed: false,
             digests: digests.clone(),

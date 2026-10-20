@@ -16,7 +16,7 @@ use crate::backend::*;
 use crate::body::{Framing, IncomingBody, RequestBody};
 use crate::conditions::{Conditions, Outcome, parse_range};
 use crate::route::{Op, Route};
-use crate::service::{Authenticated, ResponseBody, S3Service, empty_response, full, header_text, set_header, xml_response};
+use crate::service::{Authenticated, ResponseBody, S3Service, empty_response, full, header_checked, header_text, set_header, xml_response};
 
 /// The user metadata of S3 is limited to 2 KiB in all, names and values together.
 const MAX_METADATA_BYTES: usize = 2048;
@@ -70,15 +70,28 @@ fn user_metadata(headers: &HeaderMap) -> Result<Vec<(String, String)>, S3Error> 
     Ok(metadata)
 }
 
-/// `If-None-Match: *` and `If-Match` on a write.
+/// `If-None-Match: *` and `If-Match` on a write. A header that cannot be read is an error, and not a write without its condition.
 fn write_condition(headers: &HeaderMap) -> Result<WriteCondition, S3Error> {
-    if let Some(none) = header_text(headers, "if-none-match") {
+    if let Some(none) = header_checked(headers, "if-none-match")? {
         return if none.trim() == "*" { Ok(WriteCondition::Absent) } else { Err(S3Error::new(code::NOT_IMPLEMENTED, "If-None-Match takes only *")) };
     }
-    Ok(match header_text(headers, "if-match") {
+    Ok(match header_checked(headers, "if-match")? {
         Some(wanted) => WriteCondition::Match(ETagCondition::parse(wanted).unwrap_or(ETagCondition::Tags(Vec::new()))),
         None => WriteCondition::None,
     })
+}
+
+/// `If-Range`: the range is for the version of the object that the client has. The value is an ETag (a strong one, which has to be the ETag of the
+/// object) or a date (which has to be the time of the last modification). When it does not hold, or cannot be read, the range is left out and the
+/// whole object is sent, as RFC 9110 (section 13.1.5) says.
+fn if_range_holds(headers: &HeaderMap, info: &ObjectInfo) -> bool {
+    let Some(value) = headers.get("if-range") else { return true };
+    let Ok(value) = value.to_str() else { return false };
+    let value = value.trim();
+    if value.starts_with('"') || value.starts_with("W/") {
+        return !value.starts_with("W/") && value == info.etag;
+    }
+    thirtys3_core::Timestamp::parse_http_date(value) == Some(info.last_modified)
 }
 
 fn precondition_failed() -> S3Error {
@@ -121,7 +134,7 @@ fn object_headers(info: &ObjectInfo, route: &Route) -> HeaderMap {
 
 /// The `x-amz-copy-source` header: `bucket/key`, with or without a `/` in front, percent-encoded.
 fn copy_source(headers: &HeaderMap) -> Result<(String, String), S3Error> {
-    let raw = header_text(headers, "x-amz-copy-source").unwrap_or_default();
+    let raw = header_checked(headers, "x-amz-copy-source")?.unwrap_or_default();
     let (path, query) = raw.split_once('?').unwrap_or((raw, ""));
     if query.contains("versionId") {
         return Err(S3Error::new(code::NOT_IMPLEMENTED, "Copying a version is not supported"));
@@ -138,10 +151,12 @@ fn copy_source(headers: &HeaderMap) -> Result<(String, String), S3Error> {
     }
 }
 
+/// Where the object is, for the answer to the completing of an upload: the host the request was sent to, in the path style.
 fn location(parts: &Parts, bucket: &str, key: &str) -> String {
     let scheme = if header_text(&parts.headers, "x-forwarded-proto") == Some("https") { "https" } else { "http" };
-    let host = header_text(&parts.headers, "host").unwrap_or("localhost");
-    format!("{scheme}://{host}/{bucket}/{key}")
+    let host = crate::route::host_of(parts).unwrap_or_else(|| "localhost".to_owned());
+    let encoded_key = thirtys3_core::encoding::uri_encode(key.as_bytes(), false);
+    format!("{scheme}://{host}/{}/{encoded_key}", thirtys3_core::encoding::uri_encode(bucket.as_bytes(), true))
 }
 
 fn status_response(status: StatusCode) -> Response<ResponseBody> {
@@ -196,9 +211,12 @@ impl<B: Backend> S3Service<B> {
     }
 
     async fn list_buckets(&self, ctx: &Ctx<'_>, route: &Route) -> Result<Response<ResponseBody>, S3Error> {
+        let config = &self.inner.config;
+        check_length("prefix", route.param("prefix").unwrap_or_default(), config.max_listing_key_length)?;
+        check_length("continuation-token", route.param("continuation-token").unwrap_or_default(), 8192)?;
         let request = ListBucketsRequest {
             prefix: route.param("prefix").filter(|prefix| !prefix.is_empty()).map(str::to_owned),
-            max_buckets: route.param("max-buckets").map(|_| count(route, "max-buckets", 10_000)).transpose()?,
+            max_buckets: route.param("max-buckets").map(|_| count(route, "max-buckets", 10_000).map(|number| number.min(10_000))).transpose()?,
             continuation_token: route.param("continuation-token").filter(|token| !token.is_empty()).map(str::to_owned),
         };
         let prefix = request.prefix.clone();
@@ -308,14 +326,30 @@ impl<B: Backend> S3Service<B> {
             }
             Outcome::Proceed => {}
         }
-        let range = match header_text(&parts.headers, "range").and_then(parse_range) {
-            Some(spec) => Some(spec.resolve(info.size)?),
+        let wanted = header_text(&parts.headers, "range").and_then(parse_range).filter(|_| if_range_holds(&parts.headers, &info));
+        let range = match wanted {
+            Some(spec) => match spec.resolve(info.size) {
+                Ok(range) => Some(range),
+                Err(mut error) => {
+                    // A range that is outside the object is answered with the size of the object, so that the client can ask again.
+                    error.request_id = Some(ctx.request_id.to_owned());
+                    error.resource = Some(parts.uri.path().to_owned());
+                    let mut response = xml_response(error.to_xml());
+                    *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+                    set_header(response.headers_mut(), "content-range", &format!("bytes */{}", info.size));
+                    return Ok(response);
+                }
+            },
             None => None,
         };
         let covered = range.clone().unwrap_or(0..info.size);
         set_header(&mut headers, "content-length", &(covered.end - covered.start).to_string());
         if range.is_some() {
             set_header(&mut headers, "content-range", &format!("bytes {}-{}/{}", covered.start, covered.end - 1, info.size));
+            // The checksums are those of the whole object, which a part of it does not have.
+            for algorithm in ChecksumAlgorithm::ALL {
+                headers.remove(algorithm.header_name());
+            }
         }
         let body = match source {
             Some(source) if covered.end > covered.start => {
@@ -366,7 +400,7 @@ impl<B: Backend> S3Service<B> {
     async fn copy_object(&self, ctx: &Ctx<'_>, route: &Route, parts: &Parts) -> Result<Response<ResponseBody>, S3Error> {
         let headers = &parts.headers;
         let (source_bucket, source_key) = copy_source(headers)?;
-        let replace_metadata = match header_text(headers, "x-amz-metadata-directive").unwrap_or("COPY") {
+        let replace_metadata = match header_checked(headers, "x-amz-metadata-directive")?.unwrap_or("COPY") {
             "COPY" => false,
             "REPLACE" => true,
             other => return Err(invalid_argument("x-amz-metadata-directive", other, "Unknown metadata directive.")),
@@ -389,6 +423,10 @@ impl<B: Backend> S3Service<B> {
             source_conditions: Conditions::from_headers(headers, true),
             condition: write_condition(headers)?,
         };
+        // The source is read with the rights of the key that asks, as a `GET` would be, before anything is copied: this is what makes the backend
+        // refuse a copy from an object the key may not read, and it is where the conditions on the source are checked.
+        let source = self.inner.backend.head_object(ctx, &request.source_bucket, &request.source_key).await?;
+        request.source_conditions.evaluate_copy(&source.etag, source.last_modified)?;
         let output = self.inner.backend.copy_object(ctx, request).await?;
         let mut response = xml_response(
             xml::CopyObjectResult { etag: output.etag, last_modified: output.last_modified, checksum_type: None, checksums: xml::Checksums::default() }.to_xml(),
@@ -516,6 +554,16 @@ impl<B: Backend> S3Service<B> {
     ) -> Result<Response<ResponseBody>, S3Error> {
         let data = self.xml_body(auth, parts, body).await?;
         let request = xml::CompleteMultipartUploadRequest::from_xml(&data).map_err(|error| S3Error::from(&error))?;
+        // At least one part and at most 10,000, numbered from 1 to 10,000 and in ascending order: a backend gets a list that makes sense.
+        if request.parts.is_empty() || request.parts.len() > 10_000 {
+            return Err(S3Error::new(code::MALFORMED_XML, "The XML you provided was not well-formed or did not validate against our published schema."));
+        }
+        if let Some(part) = request.parts.iter().find(|part| !(1..=10_000).contains(&part.part_number)) {
+            return Err(invalid_argument("partNumber", &part.part_number.to_string(), "Part number must be an integer between 1 and 10000, inclusive"));
+        }
+        if request.parts.windows(2).any(|pair| pair[0].part_number >= pair[1].part_number) {
+            return Err(S3Error::new(code::INVALID_PART_ORDER, "The list of parts was not in ascending order. Parts must be ordered by part number."));
+        }
         let (bucket, key) = (route.bucket.clone().unwrap_or_default(), route.key.clone().unwrap_or_default());
         let output = self
             .inner
@@ -532,7 +580,12 @@ impl<B: Backend> S3Service<B> {
             )
             .await;
         let output = match output {
-            Err(error) if error.status >= 500 && self.inner.config.complete_failures_in_ok_response => return Ok(xml_response(error.to_xml())),
+            Err(mut error) if error.status >= 500 && self.inner.config.complete_failures_in_ok_response => {
+                error.request_id.get_or_insert_with(|| ctx.request_id.to_owned());
+                error.host_id.get_or_insert_with(|| ctx.request_id.to_owned());
+                error.resource.get_or_insert_with(|| parts.uri.path().to_owned());
+                return Ok(xml_response(error.to_xml()));
+            }
             other => other?,
         };
         let location = location(parts, &bucket, &key);

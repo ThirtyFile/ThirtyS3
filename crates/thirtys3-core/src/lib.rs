@@ -44,5 +44,5 @@ pub use auth::{AuthKind, ParsedAuth, PayloadHash, Verified, parse_request_auth};
 pub use chunk::ChunkChain;
 pub use error::SigError;
 pub use s3_error::S3Error;
-pub use sigv4::{Credentials, Request, Scope, SignedRequest, Signer, SigningKey, sha256_hex};
+pub use sigv4::{Credentials, Request, Scope, SignedRequest, Signer, SigningKey, constant_time_eq, sha256_hex};
 pub use time::Timestamp;

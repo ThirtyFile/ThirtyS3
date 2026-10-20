@@ -251,7 +251,7 @@ async fn the_end_of_an_upload_refuses_what_is_not_right() {
         ("a part that is not there", complete_body(&[(1, &big), (3, &small)]), "InvalidPart"),
         ("another ETag", complete_body(&[(1, "\"0123456789abcdef0123456789abcdef\""), (2, &small)]), "InvalidPart"),
         ("a small part that is not the last", complete_body(&[(2, &small), (4, &small)]), "InvalidPart"),
-        ("no parts", "<CompleteMultipartUpload></CompleteMultipartUpload>".to_owned(), "InvalidPart"),
+        ("no parts", "<CompleteMultipartUpload></CompleteMultipartUpload>".to_owned(), "MalformedXML"),
         ("not XML", "parts".to_owned(), "MalformedXML"),
         (
             "a part number that is not a number",

@@ -1180,6 +1180,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "subtle",
  "thiserror",
  "xxhash-rust",
 ]

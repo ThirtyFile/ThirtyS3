@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use http::Method;
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use thirtys3_core::Request as SignedRequestParts;
 use thirtys3_core::encoding::uri_encode;
@@ -21,6 +21,8 @@ use crate::transport::{Transport, body_error};
 
 /// The longest error body that is read.
 const MAX_ERROR_BODY: usize = 256 * 1024;
+/// How many seconds the clock of the service has to be off for a refused `HEAD` to be taken for a clock problem.
+const SKEW_FOR_HEAD: i64 = 300;
 
 /// A request before it is signed: everything but the signature, so that it can be signed again for each try.
 #[derive(Debug, Clone)]
@@ -126,6 +128,12 @@ impl Client {
             Some(extra) => format!("thirtys3-client/{} {extra}", env!("CARGO_PKG_VERSION")),
             None => format!("thirtys3-client/{}", env!("CARGO_PKG_VERSION")),
         };
+        if http::HeaderValue::from_str(&user_agent).is_err() {
+            return Err(Error::Config("user_agent cannot be used in a header".to_owned()));
+        }
+        if !region.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')) {
+            return Err(Error::Config(format!("{region:?} cannot be a region: letters, digits, '-', '_' and '.' only")));
+        }
         Ok(Self {
             inner: Arc::new(Inner {
                 transport: Transport::new(&config)?,
@@ -170,7 +178,7 @@ impl Client {
     }
 
     /// The request as it is sent: the headers of the caller, the host, the user agent and the signature.
-    fn build(&self, spec: &Spec, time: Timestamp) -> Result<http::Request<Full<Bytes>>, Error> {
+    fn build(&self, spec: &Spec, time: Timestamp) -> Result<http::Request<Bytes>, Error> {
         let target = &self.inner.target;
         let mut headers: Vec<(String, String)> = vec![("host".to_owned(), target.authority.clone()), ("user-agent".to_owned(), self.inner.user_agent.clone())];
         headers.extend(spec.headers.iter().cloned());
@@ -193,7 +201,7 @@ impl Client {
         for (name, value) in &headers {
             request = request.header(name.as_str(), value.as_str());
         }
-        request.body(Full::new(spec.body.clone())).map_err(|error| Error::InvalidInput(format!("the request is not valid: {error}")))
+        request.body(spec.body.clone()).map_err(|error| Error::InvalidInput(format!("the request is not valid: {error}")))
     }
 
     /// One try: signs, sends, and returns the response if it is a success.
@@ -207,6 +215,12 @@ impl Client {
         let status = response.status().as_u16();
         let head_only = spec.method == Method::HEAD;
         let body = if head_only { Bytes::new() } else { self.read_limited(response.into_body(), MAX_ERROR_BODY).await.map_err(|error| (error, server_time))?.0 };
+        // The answer to a `HEAD` has no body, so a clock that is out of step shows as a plain 403. When the service says it is a different time, that is
+        // taken for what it is likely to be, and the request is sent again with the time of the service.
+        if head_only && status == 403 && server_time.is_some_and(|time| (time.0 - self.now().0).abs() > SKEW_FOR_HEAD) {
+            let skewed = S3Error::new("RequestTimeTooSkewed", "The difference between the request time and the current time is too large.");
+            return Err((Error::Service(Box::new(skewed)), server_time));
+        }
         Err((error_from_body(status, &body, head_only), server_time))
     }
 
@@ -233,16 +247,29 @@ impl Client {
         }
     }
 
-    /// Sends a request and returns the response if it is a success. What fails in a way that can pass is repeated, up to `max_retries` times and
-    /// within `retry_timeout` of the start, with a wait that grows between the tries. A request that was refused for the time of this machine
-    /// being out of step with the service is sent again at once with the time of the service.
-    pub(crate) async fn execute(&self, spec: &Spec) -> Result<http::Response<Incoming>, Error> {
+    /// Sends a request, reads what the answer is wanted for with `read`, and returns that. What fails in a way that can pass is repeated, up to
+    /// `max_retries` times and within `retry_timeout` of the start, with a wait that grows between the tries; a failure of `read` (the body of the
+    /// answer breaking off) is one of them. A request that was refused for the time of this machine being out of step with the service is sent
+    /// again at once with the time of the service.
+    ///
+    /// `unknown` of the outcome says that an earlier try ended in a way that leaves it open whether the service did what was asked (the connection
+    /// broke or timed out after the request was sent), so a refusal that says the work is done already can be that of the earlier try.
+    pub(crate) async fn execute_with<T, F, Fut>(&self, spec: &Spec, mut read: F) -> Outcome<T>
+    where
+        F: FnMut(http::Response<Incoming>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, Error>>,
+    {
         let started = Instant::now();
         let mut repeats = 0_u32;
         let mut clock_corrected = false;
+        let mut unknown = false;
         loop {
-            let (error, server_time) = match self.attempt(spec).await {
-                Ok(response) => return Ok(response),
+            let attempt = match self.attempt(spec).await {
+                Ok(response) => read(response).await.map_err(|error| (error, None)),
+                Err(failure) => Err(failure),
+            };
+            let (error, server_time) = match attempt {
+                Ok(value) => return Outcome { result: Ok(value), unknown },
                 Err(failure) => failure,
             };
             if let (Error::Service(s3), Some(server_time), false) = (&error, server_time, clock_corrected)
@@ -253,19 +280,26 @@ impl Client {
                 tracing::debug!("the clock is {} seconds off the service, signing with its time", server_time.0 - Timestamp::now().0);
                 continue;
             }
-            if !error.is_retryable() || repeats >= self.inner.max_retries || started.elapsed() >= self.inner.retry_timeout {
-                return Err(error);
-            }
+            unknown |= matches!(error, Error::Timeout(_) | Error::Transport(_));
             let wait = self.inner.backoff.delay(repeats);
+            if !error.is_retryable() || repeats >= self.inner.max_retries || started.elapsed() + wait >= self.inner.retry_timeout {
+                return Outcome { result: Err(error), unknown };
+            }
             tracing::debug!("request failed ({error}); trying again in {wait:?}");
             tokio::time::sleep(wait).await;
             repeats += 1;
         }
     }
 
-    /// Sends a request and reads its whole (small) body. A body longer than `limit` is an error: no answer of S3 to the calls that use this is so long.
-    pub(crate) async fn execute_for_body(&self, spec: &Spec, limit: usize) -> Result<(http::response::Parts, Bytes), Error> {
-        let (parts, body) = self.execute(spec).await?.into_parts();
+    /// Sends a request and returns the response if it is a success (see [`execute_with`](Self::execute_with)). The body of the response is the
+    /// caller's to read, and is not covered by the retries.
+    pub(crate) async fn execute(&self, spec: &Spec) -> Result<http::Response<Incoming>, Error> {
+        self.execute_with(spec, |response| async move { Ok(response) }).await.result
+    }
+
+    /// Reads the whole (small) body of a response. A body longer than `limit` is an error: no answer of S3 to the calls that use this is so long.
+    async fn read_whole(&self, response: http::Response<Incoming>, limit: usize) -> Result<(http::response::Parts, Bytes), Error> {
+        let (parts, body) = response.into_parts();
         let (bytes, more) = self.read_limited(body, limit).await?;
         if more {
             return Err(Error::Protocol(format!("the response has more than the {limit} bytes it can have")));
@@ -273,12 +307,39 @@ impl Client {
         Ok((parts, bytes))
     }
 
+    /// Sends a request and reads its whole (small) body; a body that breaks off is tried again with the request.
+    pub(crate) async fn execute_for_body(&self, spec: &Spec, limit: usize) -> Result<(http::response::Parts, Bytes), Error> {
+        self.execute_for_body_traced(spec, limit).await.result
+    }
+
+    /// As [`execute_for_body`](Self::execute_for_body), and says whether an earlier try may have been done by the service.
+    pub(crate) async fn execute_for_body_traced(&self, spec: &Spec, limit: usize) -> Outcome<(http::response::Parts, Bytes)> {
+        self.execute_with(spec, |response| self.read_whole(response, limit)).await
+    }
+
     /// Sends a request whose answer has no body that matters (an empty one, in S3). What it does have is not read past a limit.
     pub(crate) async fn execute_ignoring_body(&self, spec: &Spec) -> Result<http::response::Parts, Error> {
-        let (parts, body) = self.execute(spec).await?.into_parts();
-        self.read_limited(body, 64 * 1024).await?;
-        Ok(parts)
+        self.execute_ignoring_body_traced(spec).await.result
     }
+
+    /// As [`execute_ignoring_body`](Self::execute_ignoring_body), and says whether an earlier try may have been done by the service.
+    pub(crate) async fn execute_ignoring_body_traced(&self, spec: &Spec) -> Outcome<http::response::Parts> {
+        self.execute_with(spec, |response| async move {
+            let (parts, body) = response.into_parts();
+            self.read_limited(body, 64 * 1024).await?;
+            Ok(parts)
+        })
+        .await
+    }
+}
+
+/// How a call ended, and whether an earlier try of it may have been carried out by the service.
+pub(crate) struct Outcome<T> {
+    pub(crate) result: Result<T, Error>,
+    /// An earlier try ended in a timeout or a broken connection after the request went out: the service may have done what was asked, and a later
+    /// try that is refused because it is done (`412` for a write that must not replace, `NoSuchUpload` for an upload that was completed) is then
+    /// not what it seems.
+    pub(crate) unknown: bool,
 }
 
 /// The error for a failed response: the S3 error document in its body, or when it is not one, what can be told from the status.

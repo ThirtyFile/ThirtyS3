@@ -65,7 +65,7 @@ impl Client {
                 size: entry.size,
                 last_modified: Some(entry.last_modified),
                 etag: Some(entry.etag),
-                storage_class: Some(entry.storage_class),
+                storage_class: Some(entry.storage_class).filter(|class| class != "STANDARD"),
                 ..ObjectMeta::default()
             })
             .collect();

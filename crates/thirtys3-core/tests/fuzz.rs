@@ -293,8 +293,7 @@ fn keys_of_any_text_survive_a_trip_through_a_document() {
             // An empty key is a document with an empty element, which is fine, and nothing else may fail.
             Err(error) => panic!("{error} for {xml:?}"),
         }
-        let parts =
-            CompleteMultipartUploadRequest { parts: keys.iter().enumerate().map(|(index, key)| CompletedPart::new(index as u32 + 1, key.clone())).collect() };
+        let parts = CompleteMultipartUploadRequest { parts: keys.iter().enumerate().map(|(index, key)| CompletedPart::new(index as u32 + 1, key.trim())).collect() };
         assert_eq!(CompleteMultipartUploadRequest::from_xml(parts.to_xml().as_bytes()).unwrap(), parts);
         let error = S3Error::new("InvalidArgument", keys[0].clone()).with_detail("ArgumentValue", keys[keys.len() - 1].clone());
         let back = S3Error::from_xml(error.to_xml().as_bytes(), 400).unwrap();

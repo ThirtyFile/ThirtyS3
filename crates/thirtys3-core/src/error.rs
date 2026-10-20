@@ -4,6 +4,7 @@ use crate::time::Timestamp;
 
 /// Why a request could not be signed, or why its signature was not accepted. The server layer turns these into S3 error responses.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SigError {
     /// The `Authorization` header is not a well-formed Signature Version 4 header.
     #[error("the Authorization header is malformed: {0}")]

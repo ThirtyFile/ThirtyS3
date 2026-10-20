@@ -180,12 +180,21 @@ async fn a_body_cut_short_never_ends_well() {
 }
 
 #[tokio::test]
-async fn data_after_the_last_chunk_is_not_part_of_the_body() {
+async fn data_after_the_last_chunk_is_not_part_of_a_body_that_is_good() {
     let mut wire = signed_wire();
     wire.extend_from_slice(b"extra");
-    let (data, result) = read_signed(wire, 1000).await;
-    assert!(result.is_ok());
-    assert_eq!(data.len(), 66560);
+    let (_, result) = read_signed(wire, 1000).await;
+    let error = result.expect_err("something follows the end");
+    assert_eq!(error.code, "InvalidRequest", "{error:?}");
+    // And the digests are not there: the upload is not acknowledged either.
+    let body = RequestBody::new(
+        body_of(split(&[signed_wire(), b"extra".to_vec()].concat(), 1000)),
+        BodyPlan { length: Some(66560), ..plan(Framing::Chunked { signed: Some(chain(false)), trailers: false }) },
+    );
+    let handle = body.handle();
+    let (_, result) = read(body).await;
+    assert!(result.is_err());
+    assert!(handle.get().is_none());
 }
 
 #[tokio::test]
@@ -195,7 +204,12 @@ async fn a_declared_length_that_is_not_the_length_of_the_data_is_incomplete_body
         let (_, result) = read(RequestBody::new(body_of(split(&signed_wire(), 8192)), plan)).await;
         let error = result.expect_err("the length is wrong");
         assert_eq!(error.code, "IncompleteBody", "{declared}");
-        assert_eq!(error.detail("NumberBytesProvided"), Some("66560"));
+        // Too many bytes are found when they come, and too few at the end.
+        if declared < 66560 {
+            assert!(error.detail("NumberBytesProvided").and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n > declared && n <= 66560), "{declared}: {error:?}");
+        } else {
+            assert_eq!(error.detail("NumberBytesProvided"), Some("66560"));
+        }
     }
 }
 
@@ -429,4 +443,24 @@ async fn a_body_that_fails_while_it_is_read_is_incomplete() {
 async fn a_body_from_bytes_and_collect() {
     let (data, digests) = RequestBody::from_bytes(Bytes::from_static(b"abc")).collect().await.unwrap();
     assert_eq!((data.as_ref(), digests.size), (b"abc".as_slice(), 3));
+}
+
+#[tokio::test]
+async fn a_body_that_is_longer_than_it_said_is_stopped_when_it_goes_over_and_not_at_its_end() {
+    use futures_util::StreamExt;
+    // 20 chunks of 8 KiB and a decoded length of 10 bytes: the first piece already is too much.
+    let wire = signed_wire();
+    let plan = BodyPlan { length: Some(10), ..plan(Framing::Chunked { signed: Some(chain(false)), trailers: false }) };
+    let mut body = RequestBody::new(body_of(split(&wire, 8192)), plan);
+    let mut delivered = 0;
+    let error = loop {
+        match body.next().await {
+            Some(Ok(piece)) => delivered += piece.len(),
+            Some(Err(error)) => break error,
+            None => panic!("the body ended well"),
+        }
+    };
+    assert_eq!(error.code, "IncompleteBody");
+    assert_eq!(delivered, 0, "nothing over the declared length was handed on");
+    assert!(body.digests().is_none());
 }

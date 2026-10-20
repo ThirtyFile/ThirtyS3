@@ -8,13 +8,14 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use http::Method;
 use thirtys3_core::checksum::{ChecksumAlgorithm, base64_encode};
+use thirtys3_core::etag::multipart_etag;
 use thirtys3_core::model::{CompleteMultipartUploadRequest, CompleteMultipartUploadResult, CompletedPart, InitiateMultipartUploadResult};
 use thirtys3_core::xml::XmlError;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::task::JoinSet;
 
 use crate::client::{Client, Spec};
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::object::{PutOptions, PutResult, error_in_ok_body};
 
 /// The most parts an upload can have.
@@ -104,8 +105,17 @@ impl MultipartUpload {
         let inner = &self.client.inner;
         let started = Instant::now();
         let mut repeats = 0;
+        let mut unknown = false;
         loop {
-            let (headers, answer) = self.client.execute_for_body(&spec, ANSWER_LIMIT).await?;
+            let outcome = self.client.execute_for_body_traced(&spec, ANSWER_LIMIT).await;
+            unknown |= outcome.unknown;
+            let (headers, answer) = match outcome.result {
+                Ok(done) => done,
+                // A try that was lost on the way may have completed the upload: the one after it finds no upload. If the object is there and is the
+                // one these parts make, the upload is complete.
+                Err(error) if unknown && error.kind() == ErrorKind::NotFound => return self.completed_by_an_earlier_try(&parts).await.ok_or(error),
+                Err(error) => return Err(error),
+            };
             match CompleteMultipartUploadResult::from_xml(&answer) {
                 Ok(result) => {
                     let mut put = PutResult::from_headers(&headers.headers);
@@ -128,12 +138,21 @@ impl MultipartUpload {
         }
     }
 
+    /// The object that completing `parts` makes, when it is there: the ETag of an upload in parts is the MD5 of the MD5s of the parts and their
+    /// number, which can be worked out from the ETags the parts were given (when they are MD5s).
+    async fn completed_by_an_earlier_try(&self, parts: &[UploadedPart]) -> Option<PutResult> {
+        let digests: Option<Vec<Vec<u8>>> = parts.iter().map(|part| thirtys3_core::encoding::hex_decode(part.etag.trim_matches('"'))).collect();
+        let expected = multipart_etag(&digests?);
+        let meta = self.client.head(&self.key).await.ok()?;
+        (meta.etag.as_deref() == Some(expected.as_str())).then_some(PutResult { etag: meta.etag, version_id: meta.version_id, checksums: meta.checksums })
+    }
+
     /// Throws away the upload and its parts. An upload that is not there any more counts as aborted.
     pub async fn abort(&self) -> Result<(), Error> {
         let spec = Spec::new(Method::DELETE, self.client.object_path(&self.key)?).query(&[("uploadId", self.upload_id.as_str())]);
         match self.client.execute(&spec).await {
             Ok(_) => Ok(()),
-            Err(error) if error.is_not_found() => Ok(()),
+            Err(Error::Service(error)) if error.code == "NoSuchUpload" => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -141,9 +160,12 @@ impl MultipartUpload {
 
 /// Reads until `size` bytes are there or the reader ends.
 async fn read_part<R: AsyncRead + Unpin>(reader: &mut R, size: usize) -> std::io::Result<Bytes> {
-    let mut buffer = BytesMut::with_capacity(size);
+    // The buffer grows as the data comes, so a small object does not hold the memory of a whole part.
+    let mut buffer = BytesMut::with_capacity(size.min(1024 * 1024));
     while buffer.len() < size {
-        if reader.read_buf(&mut buffer).await? == 0 {
+        // Never more than the part: a buffer that has grown has room for more than that.
+        let wanted = (size - buffer.len()) as u64;
+        if (&mut *reader).take(wanted).read_buf(&mut buffer).await? == 0 {
             break;
         }
     }
@@ -171,21 +193,20 @@ impl Client {
     /// fails (`part_size` has to be larger for it).
     ///
     /// Memory use is up to `multipart_concurrency + 1` parts.
+    ///
+    /// If the future is dropped before it is done (the caller gave up, or a timeout cut it), the upload is aborted in the background all the same.
     pub async fn put_multipart<R: AsyncRead + Unpin + Send>(&self, key: &str, mut reader: R, options: &PutOptions) -> Result<PutResult, Error> {
         let upload = self.create_multipart(key, options).await?;
-        match self.upload_parts(&upload, &mut reader).await {
-            Ok(parts) => match upload.complete(parts).await {
-                Ok(result) => Ok(result),
-                Err(error) => {
-                    let _ = upload.abort().await;
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                let _ = upload.abort().await;
-                Err(error)
-            }
+        let mut guard = AbortOnDrop(Some(upload.clone()));
+        let result = match self.upload_parts(&upload, &mut reader).await {
+            Ok(parts) => upload.complete(parts).await,
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            let _ = upload.abort().await;
         }
+        guard.0 = None;
+        result
     }
 
     async fn upload_parts<R: AsyncRead + Unpin + Send>(&self, upload: &MultipartUpload, reader: &mut R) -> Result<Vec<UploadedPart>, Error> {
@@ -198,6 +219,10 @@ impl Client {
             Ok(())
         };
         loop {
+            // A part that failed stops the upload now, and not when the limit of parts in flight is reached.
+            while let Some(finished) = tasks.try_join_next() {
+                collect(finished, &mut uploaded)?;
+            }
             let data = read_part(reader, part_size).await?;
             // The upload of nothing at all is one empty part; after that an empty read is the end.
             if data.is_empty() && number > 0 {
@@ -224,6 +249,19 @@ impl Client {
         }
         uploaded.sort_by_key(|part| part.part_number);
         Ok(uploaded)
+    }
+}
+
+/// Aborts an upload when it is dropped, if it was not disarmed: for the future of `put_multipart`, which can be dropped at any `.await`.
+struct AbortOnDrop(Option<MultipartUpload>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let (Some(upload), Ok(runtime)) = (self.0.take(), tokio::runtime::Handle::try_current()) {
+            runtime.spawn(async move {
+                let _ = upload.abort().await;
+            });
+        }
     }
 }
 

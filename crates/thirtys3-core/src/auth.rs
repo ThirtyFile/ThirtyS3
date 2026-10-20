@@ -15,6 +15,7 @@ use crate::time::Timestamp;
 
 /// What the `x-amz-content-sha256` header says about the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PayloadHash {
     /// `UNSIGNED-PAYLOAD`: the body is not covered by the signature.
     Unsigned,
@@ -44,6 +45,7 @@ impl PayloadHash {
 
 /// Where the signature of a request was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuthKind {
     /// The `Authorization` header.
     Header,
@@ -160,6 +162,9 @@ fn parse_signature(signature: &str, malformed: fn(String) -> SigError) -> Result
     }
 }
 
+/// The parameters of the signature of a presigned URL.
+const QUERY_AUTH_PARAMETERS: [&str; 4] = ["X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Signature", "X-Amz-SignedHeaders"];
+
 fn parse_date(amz_date: &str, scope: &Scope) -> Result<Timestamp, SigError> {
     let time = Timestamp::parse_amz_date(amz_date).ok_or_else(|| SigError::InvalidDate(amz_date.chars().take(40).collect()))?;
     if !amz_date.starts_with(&scope.date) {
@@ -230,6 +235,13 @@ fn parse_query_auth(query: &str) -> Result<ParsedAuth, SigError> {
         Ok(first)
     };
     let require = |name: &str| get(name)?.ok_or_else(|| malformed(format!("{name} is missing")));
+    // The names of the parameters of a signature are exact. A second one with another case would be dropped from the canonical query as the
+    // signature is, so the same signature would verify for many URLs.
+    if let Some((name, _)) =
+        params.iter().find(|(name, _)| !QUERY_AUTH_PARAMETERS.contains(&name.as_str()) && QUERY_AUTH_PARAMETERS.iter().any(|known| name.eq_ignore_ascii_case(known)))
+    {
+        return Err(malformed(format!("{name} is not spelled as the parameter of a signature is")));
+    }
 
     let algorithm = require("X-Amz-Algorithm")?;
     if algorithm != ALGORITHM {
@@ -246,7 +258,7 @@ fn parse_query_auth(query: &str) -> Result<ParsedAuth, SigError> {
     Ok(ParsedAuth {
         kind: AuthKind::Query,
         access_key_id,
-        time: parse_date(amz_date, &scope)?,
+        time: parse_date(amz_date, &scope).map_err(|error| malformed(error.to_string()))?,
         scope,
         signed_headers: parse_signed_headers(require("X-Amz-SignedHeaders")?, malformed)?,
         signature: parse_signature(require("X-Amz-Signature")?, malformed)?,
@@ -263,7 +275,9 @@ pub fn parse_request_auth(request: &Request<'_>) -> Result<Option<ParsedAuth>, S
     if headers.next().is_some() {
         return Err(SigError::MalformedAuthorization("there is more than one Authorization header".to_owned()));
     }
-    let in_query = query_params(request.query).iter().any(|(name, _)| name == b"X-Amz-Algorithm");
+    // A query with any of the parameters of a signature is meant to be presigned, whatever the case of the names: if it is not well formed it is
+    // refused, and not served as an anonymous request.
+    let in_query = query_params(request.query).iter().any(|(name, _)| QUERY_AUTH_PARAMETERS.iter().any(|known| name.eq_ignore_ascii_case(known.as_bytes())));
     match (authorization, in_query) {
         (Some(_), true) => Err(SigError::ConflictingAuthentication),
         (Some(value), false) => parse_header_auth(request, value).map(Some),
@@ -289,7 +303,8 @@ impl ParsedAuth {
     /// Checks the time and the signature of `request` against the secret of [`access_key_id`](Self::access_key_id).
     ///
     /// - The time, as [`check_time`](Self::check_time) does.
-    /// - A header signature must cover every `x-amz-*` header of the request.
+    /// - The signature must cover every `x-amz-*` header of the request, in a presigned URL as well as in a header (only the payload hash of a
+    ///   presigned URL is exempt, because it is signed through the canonical request).
     /// - The signature is compared in constant time.
     ///
     /// The scope's region is not checked here: [`scope`](Self::scope) has it for the server to compare with its own.
@@ -304,18 +319,19 @@ impl ParsedAuth {
         };
         let payload_hash = PayloadHash::parse(payload_text)?;
 
-        if self.kind == AuthKind::Header {
-            let mut unsigned: Vec<String> = request
-                .headers
-                .iter()
-                .map(|(name, _)| name.to_ascii_lowercase())
-                .filter(|name| name.starts_with("x-amz-") && !self.signed_headers.contains(name))
-                .collect();
-            unsigned.sort();
-            unsigned.dedup();
-            if !unsigned.is_empty() {
-                return Err(SigError::HeadersNotSigned(unsigned));
-            }
+        // Every `x-amz-*` header has to be signed, in a presigned URL as well as in a header: they change what a request does (`x-amz-copy-source` turns
+        // an upload into a copy, `x-amz-acl` and the encryption headers change what is stored), and whoever holds a presigned URL must not be able to add
+        // them. The payload hash of a presigned URL is part of what is signed through the canonical request, so it is no exception.
+        let mut unsigned: Vec<String> = request
+            .headers
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .filter(|name| name.starts_with("x-amz-") && !self.signed_headers.contains(name) && !(self.kind == AuthKind::Query && name == "x-amz-content-sha256"))
+            .collect();
+        unsigned.sort();
+        unsigned.dedup();
+        if !unsigned.is_empty() {
+            return Err(SigError::HeadersNotSigned(unsigned));
         }
 
         let canonical = canonical_request(request, &self.signed_headers, payload_text, self.kind == AuthKind::Query)?;

@@ -44,14 +44,21 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex_encode(&Sha256::digest(data))
 }
 
+/// Whether two byte strings are equal, in a time that depends on their length and not on where they differ. For secrets, such as a session token.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
+}
+
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts a key of any length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
 
-/// An access key and its secret, with the session token of temporary credentials when there is one.
-#[derive(Clone, PartialEq, Eq)]
+/// An access key and its secret, with the session token of temporary credentials when there is one. There is no `PartialEq`: comparing secrets is
+/// for [`constant_time_eq`].
+#[derive(Clone)]
 pub struct Credentials {
     /// The access key ID.
     pub access_key_id: String,
@@ -103,7 +110,7 @@ impl fmt::Display for Scope {
 }
 
 /// The key a request is signed with, derived from the secret access key and the scope. It is valid for one scope.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SigningKey([u8; 32]);
 
 impl SigningKey {
@@ -149,11 +156,11 @@ pub struct Request<'a> {
 }
 
 /// The value of a header as it goes into the canonical request: values joined with `,`, each with surrounding spaces removed and
-/// runs of spaces made one. `None` when the request has no such header.
+/// runs of spaces made one (only ASCII white space is taken for a space: a no-break space is a character of the value). `None` when the request has no such header.
 fn canonical_header_value(headers: &[(&str, &str)], name: &str) -> Option<String> {
     let mut values = headers.iter().filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name)).map(|(_, value)| value).peekable();
     values.peek()?;
-    let joined: Vec<String> = values.map(|value| value.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    let joined: Vec<String> = values.map(|value| value.split_ascii_whitespace().collect::<Vec<_>>().join(" ")).collect();
     Some(joined.join(","))
 }
 

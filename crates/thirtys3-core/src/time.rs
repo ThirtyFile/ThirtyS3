@@ -108,7 +108,12 @@ impl Timestamp {
         }
         match rest {
             "Z" => Some(base),
-            offset if offset.len() == 6 && matches!(offset.as_bytes()[0], b'+' | b'-') && offset.as_bytes()[3] == b':' => {
+            offset
+                if offset.len() == 6
+                    && matches!(offset.as_bytes()[0], b'+' | b'-')
+                    && offset.as_bytes()[3] == b':'
+                    && [1, 2, 4, 5].iter().all(|&index| offset.as_bytes()[index].is_ascii_digit()) =>
+            {
                 let hours: i64 = offset[1..3].parse().ok()?;
                 let minutes: i64 = offset[4..6].parse().ok()?;
                 if hours > 23 || minutes > 59 {

@@ -14,6 +14,7 @@ pub const S3_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 
 /// What can be wrong with an XML document, or with what a document says.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum XmlError {
     /// The document is not well-formed XML.
     #[error("the XML is not well formed (byte {position}): {message}")]
@@ -249,6 +250,10 @@ fn is_xml_char(character: char) -> bool {
 }
 
 /// Writes a document in the compact form S3 uses.
+///
+/// A character that XML 1.0 does not allow (a control character in a key, for one) is written as a character reference, such as `&#x1;`, as S3
+/// does. That is not well-formed XML 1.0, and the reader of this crate takes it back as the character; a strict parser will not. A service whose keys
+/// can hold such characters should have its clients ask for `encoding-type=url`.
 #[derive(Debug)]
 pub struct XmlWriter {
     out: String,

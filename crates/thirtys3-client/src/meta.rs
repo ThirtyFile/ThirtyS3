@@ -23,7 +23,15 @@ pub struct ObjectMeta {
     pub etag: Option<String>,
     /// The content type.
     pub content_type: Option<String>,
-    /// The storage class (only when the service says: S3 leaves it out for `STANDARD`).
+    /// The `Content-Disposition`, such as the name a browser offers for the download. Only a `head` or a `get` has it.
+    pub content_disposition: Option<String>,
+    /// The `Content-Encoding`. Only a `head` or a `get` has it.
+    pub content_encoding: Option<String>,
+    /// The `Content-Language`. Only a `head` or a `get` has it.
+    pub content_language: Option<String>,
+    /// The `Cache-Control`. Only a `head` or a `get` has it.
+    pub cache_control: Option<String>,
+    /// The storage class. `None` is `STANDARD`, which is what S3 leaves out of a `head` and what a listing is made to agree with.
     pub storage_class: Option<String>,
     /// The version, in a bucket with versioning.
     pub version_id: Option<String>,
@@ -35,6 +43,7 @@ pub struct ObjectMeta {
 
 /// Which bytes of an object to download.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GetRange {
     /// From the first number to before the second: `3..7` is four bytes. It must not be empty.
     Bounded(Range<u64>),
@@ -108,7 +117,11 @@ pub(crate) fn from_headers(key: &str, headers: &HeaderMap, partial: bool) -> Res
         last_modified: text(headers, "last-modified").and_then(Timestamp::parse_http_date),
         etag: text(headers, "etag").map(|etag| etag.trim().to_owned()),
         content_type: text(headers, "content-type").map(str::to_owned),
-        storage_class: text(headers, "x-amz-storage-class").map(str::to_owned),
+        content_disposition: text(headers, "content-disposition").map(str::to_owned),
+        content_encoding: text(headers, "content-encoding").map(str::to_owned),
+        content_language: text(headers, "content-language").map(str::to_owned),
+        cache_control: text(headers, "cache-control").map(str::to_owned),
+        storage_class: text(headers, "x-amz-storage-class").filter(|class| *class != "STANDARD").map(str::to_owned),
         version_id: text(headers, "x-amz-version-id").map(str::to_owned),
         metadata,
         checksums,

@@ -32,7 +32,8 @@ fn the_kind_of_a_service_error() {
         ("BadDigest", 400, ErrorKind::Rejected),
         ("InvalidArgument", 400, ErrorKind::Rejected),
         ("BucketNotEmpty", 409, ErrorKind::Rejected),
-        ("NotImplemented", 501, ErrorKind::Unavailable),
+        // A service that does not do it will not do it later either.
+        ("NotImplemented", 501, ErrorKind::Rejected),
     ] {
         assert_eq!(service(code, status).kind(), kind, "{code} {status}");
     }

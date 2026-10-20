@@ -22,6 +22,10 @@ fn parse_root(xml: &[u8], name: &'static str) -> Result<Element, XmlError> {
     xml::parse_root(xml, name, &Limits::default())
 }
 
+/// The limits for the document of `DeleteObjects`: 1,000 objects of up to six elements each, three levels deep. A larger document is refused before
+/// a tree is built for it.
+const DELETE_LIMITS: Limits = Limits { max_bytes: 4 * 1024 * 1024, max_depth: 4, max_elements: 10_000 };
+
 fn parse_bool(text: &str) -> Option<bool> {
     match text {
         "true" => Some(true),
@@ -75,6 +79,11 @@ fn optional_time(element: &Element, name: &str) -> Result<Option<Timestamp>, Xml
 
 fn optional_text(element: &Element, name: &str) -> Option<String> {
     element.child_text(name).map(str::to_owned)
+}
+
+/// The text of a child with the white space around it taken off, for values that are never meant to have any (an ETag, an upload ID, a version).
+fn optional_trimmed(element: &Element, name: &str) -> Option<String> {
+    element.child_text(name).map(|text| text.trim().to_owned())
 }
 
 fn required_number<T: FromStr>(element: &Element, name: &'static str) -> Result<T, XmlError> {
@@ -557,14 +566,14 @@ impl DeleteRequest {
 
     /// Reads the document.
     pub fn from_xml(xml: &[u8]) -> Result<Self, XmlError> {
-        let root = parse_root(xml, "Delete")?;
+        let root = xml::parse_root(xml, "Delete", &DELETE_LIMITS)?;
         let objects = root
             .children_named("Object")
             .map(|object| {
                 Ok(DeleteObjectId {
                     key: object.required_text("Key")?.to_owned(),
-                    version_id: optional_text(object, "VersionId"),
-                    etag: optional_text(object, "ETag"),
+                    version_id: optional_trimmed(object, "VersionId"),
+                    etag: optional_trimmed(object, "ETag"),
                     last_modified_time: optional_time(object, "LastModifiedTime")?,
                     size: object.parsed_child("Size", parse_number)?,
                 })
@@ -695,7 +704,7 @@ impl InitiateMultipartUploadResult {
         Ok(Self {
             bucket: root.required_text("Bucket")?.to_owned(),
             key: root.required_text("Key")?.to_owned(),
-            upload_id: root.required_text("UploadId")?.to_owned(),
+            upload_id: root.required_text("UploadId")?.trim().to_owned(),
         })
     }
 }
@@ -742,7 +751,9 @@ impl CompleteMultipartUploadRequest {
         let root = parse_root(xml, "CompleteMultipartUpload")?;
         let parts = root
             .children_named("Part")
-            .map(|part| Ok(CompletedPart { part_number: required_number(part, "PartNumber")?, etag: optional_text(part, "ETag"), checksums: Checksums::read(part) }))
+            .map(|part| {
+                Ok(CompletedPart { part_number: required_number(part, "PartNumber")?, etag: optional_trimmed(part, "ETag"), checksums: Checksums::read(part) })
+            })
             .collect::<Result<_, XmlError>>()?;
         Ok(Self { parts })
     }
