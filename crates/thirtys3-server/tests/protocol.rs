@@ -115,7 +115,9 @@ async fn a_key_the_backend_refuses_is_no_guess() {
 async fn a_clock_that_is_out_of_step_is_refused_before_anything_is_counted() {
     let backend = Watched::new();
     let server = start_with(backend.clone(), support::config()).await;
-    for offset in [-3600, 3600, -901, 901] {
+    // Margins of ten seconds on both sides of the 900 of the limit: the time of the request is made first and the server looks at it later, perhaps seconds
+    // later on a slow machine, and a second that goes by in between moves a request that is on the line to the other side of it
+    for offset in [-3600, 3600, -910, 910] {
         let answer = req(Method::GET, "/bucket/k").at(Timestamp(Timestamp::now().0 + offset)).send(&server).await;
         assert_eq!(answer.status, StatusCode::FORBIDDEN, "{offset}");
         let xml = answer.text();
@@ -124,7 +126,7 @@ async fn a_clock_that_is_out_of_step_is_refused_before_anything_is_counted() {
         assert!(tag(&xml, "ServerTime").is_some() && tag(&xml, "RequestTime").is_some());
     }
     assert!(backend.events().is_empty(), "no attempt was begun: {:?}", backend.events());
-    for offset in [-899, 899] {
+    for offset in [-890, 890] {
         assert_eq!(req(Method::GET, "/bucket/k").at(Timestamp(Timestamp::now().0 + offset)).send(&server).await.status, StatusCode::NOT_FOUND, "{offset}");
     }
 }
