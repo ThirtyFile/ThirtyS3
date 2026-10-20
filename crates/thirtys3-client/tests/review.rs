@@ -38,7 +38,7 @@ async fn a_download_that_keeps_coming_survives_a_break_long_after_its_start() {
 
 // ---- a slow upload is not a silent one ----
 
-/// A service that reads a request body slowly, `pause` after each read of up to 128 KiB, and then answers `200` with no body. When `stop` is true it
+/// A service that reads a request body slowly, `pause` before each read of up to 1 MiB, and then answers `200` with no body. When `stop` is true it
 /// reads nothing of the body at all.
 async fn slow_reader(pause: Duration, stop: bool) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -48,7 +48,7 @@ async fn slow_reader(pause: Duration, stop: bool) -> String {
             let Ok((mut stream, _)) = listener.accept().await else { return };
             tokio::spawn(async move {
                 let mut head = Vec::new();
-                let mut buffer = vec![0u8; 128 * 1024];
+                let mut buffer = vec![0u8; MIB];
                 let end = loop {
                     let read = stream.read(&mut buffer).await.unwrap_or(0);
                     if read == 0 {
@@ -91,12 +91,13 @@ fn plain_client(endpoint: &str, read_timeout: Duration) -> Client {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_upload_that_takes_longer_than_the_read_timeout_but_moves_is_not_cut_off() {
-    // 24 MiB read at 128 KiB per 12 ms takes seconds; there is never a quiet moment of a third of a second.
-    let endpoint = slow_reader(Duration::from_millis(12), false).await;
-    let client = plain_client(&endpoint, Duration::from_millis(400));
+    // 64 MiB read at 1 MiB per 20 ms takes more than a second, and there is never a quiet moment of a second. (The socket holds some MiB that the client has
+    // handed over and the service has not read yet: on Linux that is a good many, and the time they need is the margin of the timeout after the last byte.)
+    let endpoint = slow_reader(Duration::from_millis(20), false).await;
+    let client = plain_client(&endpoint, Duration::from_millis(800));
     let started = Instant::now();
-    client.put("big", Bytes::from(content(24 * MIB)), &PutOptions::default()).await.unwrap();
-    assert!(started.elapsed() > Duration::from_millis(400), "{:?}", started.elapsed());
+    client.put("big", Bytes::from(content(64 * MIB)), &PutOptions::default()).await.unwrap();
+    assert!(started.elapsed() > Duration::from_millis(800), "{:?}", started.elapsed());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,0 +1,22 @@
+name: Suggest an idea
+description: Something the library should do, or do better
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What are you trying to do?
+      description: The situation you are in and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: How you imagine it working, in the API or on the wire. The page of the AWS documentation helps, if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: instead
+    attributes:
+      label: What do you do instead for now?

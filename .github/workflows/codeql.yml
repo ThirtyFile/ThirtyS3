@@ -1,0 +1,67 @@
+# CodeQL code scanning of main: after merges, every week, before each release (release.yml calls it), or by hand (Actions > CodeQL >
+# Run workflow). Pull requests aren't scanned: this saves CI time, and a release still never ships code that wasn't scanned.
+#
+# Results show under Security > Code scanning. The weekly scan only reports them there, so problems show up between
+# releases without holding anything up. The release stops when the scan finds an open alert of high or critical
+# security severity: fix it, or dismiss it there when it doesn't apply, then run the release again.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 4 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, rust]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          category: /language:${{ matrix.language }}
+
+  # Once every result is processed: open alerts of high or critical severity on the scanned branch stop the release.
+  # Not for the weekly scan, which only reports
+  alerts:
+    name: No serious alerts
+    needs: analyze
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      security-events: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref }}
+        run: |
+          alerts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&tool_name=CodeQL&ref=$REF&per_page=100" \
+            --jq '.[] | select(.rule.security_severity_level == "high" or .rule.security_severity_level == "critical")
+                  | "\(.rule.security_severity_level)\t\(.rule.id)\t\(.most_recent_instance.location.path):\(.most_recent_instance.location.start_line)\t\(.html_url)"')
+          if [ -n "$alerts" ]; then
+            echo "::error::CodeQL found open alerts of high or critical severity. Fix them, or dismiss them under Security > Code scanning, then release again."
+            echo "$alerts"
+            exit 1
+          fi
+          echo "No open alerts of high or critical severity."

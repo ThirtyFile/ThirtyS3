@@ -1,0 +1,53 @@
+name: Report a problem
+description: The client or the server does something it should not, or does not do what S3 does
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Found a security problem?** Don't write it here. Use [Report a vulnerability](https://github.com/ThirtyFile/ThirtyS3/security/advisories/new) so it stays private until it is fixed.
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part?
+      options:
+        - Client (thirtys3-client)
+        - Server (thirtys3-server)
+        - Signing and documents (thirtys3-core)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: The request and the answer
+      description: The request that was sent and the answer, with the headers (the output of `aws --debug` or `curl -v`, or a capture). Remove the keys and the signatures.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The version of the crate that has the problem.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: other
+    attributes:
+      label: The other side
+      description: The service the client talks to, or the client of the server, with its version.
+      placeholder: AWS S3, MinIO RELEASE.2025-..., aws-cli 2.35, rclone 1.68
+  - type: textarea
+    id: config
+    attributes:
+      label: Settings
+      description: The settings that matter (`ClientConfig` or `ServerConfig`), and a word on the backend if it is the server.

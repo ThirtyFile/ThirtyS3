@@ -1,0 +1,19 @@
+# How GitHub groups merged pull requests in the notes of a release
+changelog:
+  exclude:
+    labels: [skip-release-notes]
+  categories:
+    - title: New
+      labels: [enhancement]
+    - title: Fixed
+      labels: [bug]
+    - title: Faster
+      labels: [performance]
+    - title: Documentation
+      labels: [documentation]
+    - title: Updated dependencies
+      labels: [dependencies]
+    - title: Maintenance
+      labels: [maintenance]
+    - title: Other changes
+      labels: ["*"]

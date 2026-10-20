@@ -1,0 +1,21 @@
+name: Improve the documentation
+description: Something in the README, the crate documentation or the examples is missing, wrong or unclear
+labels: [documentation]
+body:
+  - type: input
+    id: where
+    attributes:
+      label: Where is it?
+      description: A link, or the name of the page or item.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is missing, wrong or unclear?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should it say?

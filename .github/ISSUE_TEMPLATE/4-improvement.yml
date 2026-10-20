@@ -1,0 +1,39 @@
+name: Improve the code
+description: Code quality, speed, tests, or the build, without a visible bug
+labels: [maintenance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For something that doesn't work, use **Report a problem** instead. **Found a security problem?** Use [Report a vulnerability](https://github.com/ThirtyFile/ThirtyS3/security/advisories/new) so it stays private until it is fixed.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Code quality
+        - Speed or resource use
+        - Tests
+        - Build, CI or the release
+        - Hardening (not an exploitable problem)
+    validations:
+      required: true
+  - type: textarea
+    id: now
+    attributes:
+      label: What is the situation today?
+      description: Where it is (`file:line` or a link to the code) and why it matters. Numbers help for speed.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should change?
+      description: The change you suggest, and anything it must keep working.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: How can we tell it is done?
+      description: A test, a measurement, or a check that shows the result.

@@ -18,6 +18,19 @@ updates:
       rust:
         update-types: [minor, patch]
 
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 3
+    groups:
+      fuzz:
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

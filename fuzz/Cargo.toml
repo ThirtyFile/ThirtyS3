@@ -1,0 +1,54 @@
+[package]
+name = "thirtys3-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+libfuzzer-sys = "0.4"
+thirtys3-core = { path = "../crates/thirtys3-core" }
+thirtys3-server = { path = "../crates/thirtys3-server" }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+
+[workspace]
+
+[[bin]]
+name = "xml"
+path = "fuzz_targets/xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth"
+path = "fuzz_targets/auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunked"
+path = "fuzz_targets/chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "headers"
+path = "fuzz_targets/headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "service"
+path = "fuzz_targets/service.rs"
+test = false
+doc = false
+bench = false

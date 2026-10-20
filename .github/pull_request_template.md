@@ -4,11 +4,12 @@
 
 ## How it was tested
 
-<!-- What you ran: tests, and which S3 service or client you tried it against -->
+<!-- The test that fails without the change, and what you tried against a real client or service -->
 
 ## Checklist
 
-- [ ] The title says what changes, in plain words
-- [ ] Every fix has a test that fails without it
-- [ ] `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` pass
-- [ ] New public items have documentation, naming the AWS page they follow
+- [ ] The title says what changes, in plain words (it becomes the line in the release notes)
+- [ ] One label: `enhancement`, `bug`, `performance`, `documentation`, `dependencies` or `maintenance`
+- [ ] The code is formatted (`cargo fmt`), and `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` pass
+- [ ] A fix has a test that fails without it
+- [ ] The `compatibility` page (`crates/thirtys3-core/src/compatibility.rs`), the README and the documentation are updated if behaviour changes

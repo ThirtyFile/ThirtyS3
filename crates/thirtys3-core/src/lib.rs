@@ -5,6 +5,7 @@
 //! - Documents: [`xml`] (a reader with limits and a writer), [`model`] (the request and result documents of the operations a file service offers)
 //!   and [`s3_error`] (the `<Error>` document and the table of error codes).
 //! - Integrity: [`checksum`] (the ten algorithms of S3, streaming) and [`etag`] (ETags and `If-Match` / `If-None-Match`).
+//! - What the whole library supports, its limits and how it is tested: the [`compatibility`] page.
 //!
 //! ```
 //! use thirtys3_core::sigv4::EMPTY_PAYLOAD_SHA256;
@@ -31,6 +32,7 @@
 pub mod auth;
 pub mod checksum;
 pub mod chunk;
+pub mod compatibility;
 pub mod encoding;
 pub mod error;
 pub mod etag;

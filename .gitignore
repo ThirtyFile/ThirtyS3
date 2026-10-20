@@ -2,3 +2,7 @@
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
+
+# Notes for coding agents stay local
+/AGENTS.md
+/CLAUDE.md

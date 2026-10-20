@@ -76,7 +76,7 @@ The server takes care of authentication, the body checks, routing, conditions, r
 
 ThirtyS3 handles uploads, downloads, listings, copies, deletes and multipart uploads, with Signature Version 4 in headers or in presigned URLs. It does
 not do IAM, bucket policies, ACLs, versioning, server-side encryption or the many bucket-level settings, and the server answers those with
-`NotImplemented`. The full list, the limits you can set and how everything is tested are in [docs/compatibility.md](docs/compatibility.md).
+`NotImplemented`. The full list, the limits you can set and how everything is tested are on the `compatibility` page of the `thirtys3-core` documentation.
 
 ## Contributing
 

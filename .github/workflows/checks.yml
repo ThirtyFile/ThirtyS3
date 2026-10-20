@@ -1,13 +1,16 @@
-# The pull-request gate: formatting, clippy with warnings as errors and the tests, on Linux and Windows.
+# The pull-request gate: formatting, clippy with warnings as errors, the documentation, and the tests on Linux and Windows; the build of the fuzz
+# targets and of the packages; and the dependencies (cargo deny). The tests use the AWS CLI where it is installed (the runners have it).
 name: Checks
 
 on:
   pull_request:
   push:
     branches: [main]
+  # Called by release.yml
+  workflow_call:
 
 concurrency:
-  group: checks-${{ github.ref }}
+  group: checks-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -17,7 +20,7 @@ jobs:
   check:
     name: Checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -31,13 +34,45 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo test --workspace --locked
+      # The client with the other crypto provider of its TLS
+      - run: cargo clippy -p thirtys3-client --no-default-features --features ring --locked -- -D warnings
+        if: matrix.os == 'ubuntu-latest'
+      # The fuzz targets are not built by the tests: an API change must not break them unseen (the fuzzing itself is in fuzz.yml)
+      - run: cargo check --locked --manifest-path fuzz/Cargo.toml
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          RUSTFLAGS: --cfg fuzzing
+      # What `cargo publish` would send must build by itself. In a folder of its own: the build cache is saved from `target`, and the unpacked
+      # crates in it make the cache step fail to read the folder
+      - run: cargo package --workspace --locked
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/package
+
+  # Known security problems in the dependencies, their licences and where they come from (deny.toml)
+  deny:
+    name: Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
 
   passed:
     name: Checks passed
     if: always()
-    needs: check
+    needs: [check, deny]
     runs-on: ubuntu-latest
     steps:
-      - run: test "${{ needs.check.result }}" = success
+      - run: test "${{ needs.check.result }}" = success && test "${{ needs.deny.result }}" = success
