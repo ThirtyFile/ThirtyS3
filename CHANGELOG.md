@@ -23,6 +23,8 @@ The first version. Nothing is published yet.
   - The client's timeout is for silence also while a request is being uploaded; a lost answer to a conditional `put` or to the completing of an
     upload no longer reads as a failure; the body of an answer that breaks off is retried; `put_multipart` aborts its upload when it is dropped;
     a download that goes on is not cut off by `retry_timeout`; `delete` no longer takes any 404 for a deleted key.
+  - Copies, deletes and the creating, completing and aborting of uploads are done to their end when the client goes away (`detach_mutations`).
+  - The client can trust the roots of a private authority (`ClientConfig::root_certificates_pem`), and a TLS failure is its own error (`Error::Tls`).
   - `Debug` of errors, `Ctx` and `AuthInfo` leaves out signatures and tokens; secrets have no `PartialEq`; public enums that will grow are
     `#[non_exhaustive]`.
 - Tests: the AWS documentation's examples and signing test suite, cross-checks with `aws-sigv4`, the AWS CLI v2, RustFS, random input for every

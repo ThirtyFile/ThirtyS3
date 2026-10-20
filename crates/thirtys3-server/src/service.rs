@@ -140,6 +140,34 @@ impl<B: Backend> S3Service<B> {
         let id = request_id();
         let (parts, body) = request.into_parts();
         let body: IncomingBody = body.map_err(Into::into).boxed_unsync();
+        // An operation that changes something is done to its end whatever becomes of the client: when the client goes away, the future that answers
+        // it is dropped, wherever it is, and a copy or the completing of an upload would be left half done. Such an operation, with the
+        // authentication that comes before it, runs in a task of its own. An upload is not one of them: when its client goes away, it is meant to
+        // stop, and the body it is reading ends with an error.
+        let detach = self.inner.config.detach_mutations && route::route(&parts, &self.inner.config).is_ok_and(|route| route.op.runs_to_the_end());
+        let service = self.clone();
+        let request_id = id.clone();
+        let work = async move { service.answer(request_id, parts, body).await };
+        if !detach {
+            return work.await;
+        }
+        match tokio::spawn(work).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::error!("the task of a request failed: {error}");
+                let mut error = S3Error::new(code::INTERNAL_ERROR, "We encountered an internal error. Please try again.");
+                error.request_id = Some(id.clone());
+                error.host_id = Some(id.clone());
+                let mut response = failed(error);
+                set_header(response.headers_mut(), "x-amz-request-id", &id);
+                set_header(response.headers_mut(), "x-amz-id-2", &id);
+                response
+            }
+        }
+    }
+
+    /// The answer to a request, errors and the headers every answer has included.
+    async fn answer(&self, id: String, parts: Parts, body: IncomingBody) -> Response<ResponseBody> {
         let mut response = match self.process(&id, &parts, body).await {
             Ok(response) => response,
             Err(mut error) => {

@@ -10,10 +10,12 @@
 //!
 //! # What a backend must be ready for
 //!
-//! - **A request can be dropped at any `.await`.** When a client goes away, the future that is answering it is dropped, wherever it is: in the hooks
-//!   of the authentication, in a `copy_object`, in a `complete_multipart_upload`. A method that changes something should either do it in one step or
-//!   leave things so that a half-done call can be told and cleaned up. [`Backend::after_authentication`] is not called for a request that is dropped
-//!   before the authentication is over, so a limit on attempts must not hold anything it needs that call to give back.
+//! - **A request can be dropped at any `.await`.** When a client goes away, the future that is answering it is dropped, wherever it is. For the
+//!   operations that change something and have no body to read (`copy_object`, `delete_object`, `delete_objects` and creating, completing and
+//!   aborting an upload) the service avoids that: they run to their end in a task of their own, with the authentication before them
+//!   ([`ServerConfig::detach_mutations`](crate::ServerConfig)), and the hooks of the authentication get their calls. Reads and uploads are
+//!   dropped with their client, as they should: an upload that stops reading its body gets an error from it. Put the work that must not be cut
+//!   in the methods of the first kind, and keep a method that is dropped from leaving something that cannot be told from a finished upload.
 //! - **An upload is good only if its body ended with `None`.** The body of [`put_object`](Backend::put_object) and
 //!   [`upload_part`](Backend::upload_part) is a stream of `Result`s: when a check fails (a digest, a signature, the length) the stream gives an `Err`
 //!   and then ends, so a loop that stops at the first `Err` and treats the stop as the end (`while let Some(Ok(piece)) = body.next().await`) keeps

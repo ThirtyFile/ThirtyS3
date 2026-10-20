@@ -33,17 +33,18 @@ fn crypto_provider() -> rustls::crypto::CryptoProvider {
 #[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
 compile_error!("thirtys3-client needs one of the features `aws-lc-rs` and `ring` for TLS");
 
-/// The TLS configuration: the provider chosen by the features and the certificate verification of the operating system. The connector sets
-/// the protocols (HTTP/1.1).
-fn tls_config() -> Result<rustls::ClientConfig, Error> {
+/// The TLS configuration: the provider chosen by the features and the certificate verification of the operating system, with the roots that were
+/// added to it. The connector sets the protocols (HTTP/1.1).
+fn tls_config(extra_roots: &[Vec<u8>]) -> Result<rustls::ClientConfig, Error> {
     let tls = |error: rustls::Error| Error::Config(format!("TLS could not be set up: {error}"));
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(tls)?
-        .with_platform_verifier()
-        .map_err(tls)?
-        .with_no_client_auth();
-    Ok(config)
+    let provider = Arc::new(crypto_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions().map_err(tls)?;
+    if extra_roots.is_empty() {
+        return Ok(builder.with_platform_verifier().map_err(tls)?.with_no_client_auth());
+    }
+    let roots = extra_roots.iter().map(|der| rustls::pki_types::CertificateDer::from(der.clone()));
+    let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(roots, provider).map_err(tls)?;
+    Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)).with_no_client_auth())
 }
 
 /// The text of an error and of what caused it.
@@ -127,7 +128,8 @@ impl Transport {
         http.enforce_http(false);
         http.set_nodelay(true);
         http.set_connect_timeout(Some(config.connect_timeout));
-        let https = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls_config()?).https_or_http().enable_http1().wrap_connector(http);
+        let https =
+            hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls_config(&config.root_certificates)?).https_or_http().enable_http1().wrap_connector(http);
         // A connection that has been idle for a while is likely closed by the other side, so it is not reused after 20 seconds.
         let client = HyperClient::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(20)).build(https);
         Ok(Self { client, read_timeout: config.read_timeout })

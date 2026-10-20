@@ -348,3 +348,127 @@ fn thirtys3_server_keys(xml: &str) -> Vec<String> {
     }
     keys
 }
+
+// ---- an operation that changes something is done to its end ----
+
+/// A request with a body, signed, for the service to answer in the process.
+fn request_with(method: &str, target: &str, extra: &[(&str, &str)], body: &[u8]) -> http::Request<Full<Bytes>> {
+    let (headers, _) = signed_headers("localhost", method, target, extra, Some(body.len()), &thirtys3_core::sha256_hex(body), &support::signer());
+    let mut builder = http::Request::builder().method(method).uri(target);
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    builder.body(Full::new(Bytes::copy_from_slice(body))).unwrap()
+}
+
+async fn wait_for(backend: &Watched, event: &str) {
+    for _ in 0..300 {
+        if backend.events().iter().any(|candidate| candidate == event) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("{event:?} did not happen: {:?}", backend.events());
+}
+
+/// Answers `request`, drops the future that answers it once `begun` has happened, and returns.
+async fn drop_in_the_middle(service: &S3Service<Watched>, backend: &Watched, request: http::Request<Full<Bytes>>, begun: &str) {
+    let answering = tokio::spawn({
+        let service = service.clone();
+        async move { service.handle(request).await }
+    });
+    wait_for(backend, begun).await;
+    answering.abort();
+    let _ = answering.await;
+}
+
+fn slow_service(config: ServerConfig) -> (S3Service<Watched>, Watched) {
+    let (service, backend) = service(config);
+    *backend.op_delay.lock().unwrap() = std::time::Duration::from_millis(250);
+    (service, backend)
+}
+
+#[tokio::test]
+async fn a_client_that_goes_away_does_not_leave_a_copy_or_a_delete_half_done() {
+    let (service, backend) = slow_service(support::config());
+    backend.inner.insert(BUCKET, "source", b"data");
+    backend.inner.insert(BUCKET, "doomed", b"data");
+    backend.inner.insert(BUCKET, "doomed too", b"data");
+
+    drop_in_the_middle(&service, &backend, request_with("PUT", "/bucket/copy", &[("x-amz-copy-source", "bucket/source")], b""), "copy started").await;
+    wait_for(&backend, "copy finished").await;
+    assert_eq!(backend.inner.object(BUCKET, "copy").unwrap(), "data");
+
+    backend.events.lock().unwrap().clear();
+    drop_in_the_middle(&service, &backend, request_with("DELETE", "/bucket/doomed", &[], b""), "delete started").await;
+    wait_for(&backend, "delete finished").await;
+    assert!(backend.inner.object(BUCKET, "doomed").is_none());
+
+    backend.events.lock().unwrap().clear();
+    let body = b"<Delete><Object><Key>doomed too</Key></Object></Delete>";
+    drop_in_the_middle(&service, &backend, request_with("POST", "/bucket?delete", &[], body), "delete started").await;
+    for _ in 0..300 {
+        if backend.inner.object(BUCKET, "doomed too").is_none() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the delete of several objects was left half done");
+}
+
+#[tokio::test]
+async fn a_client_that_goes_away_does_not_leave_an_upload_half_put_together() {
+    let (service, backend) = service(support::config());
+    let created = service.handle(request_with("POST", "/bucket/big?uploads", &[], b"")).await;
+    let id = tag(&String::from_utf8_lossy(&created.into_body().collect().await.unwrap().to_bytes()), "UploadId").unwrap();
+    let part = service.handle(request_with("PUT", &format!("/bucket/big?partNumber=1&uploadId={id}"), &[], b"the one part")).await;
+    let etag = part.headers().get("etag").unwrap().to_str().unwrap().to_owned();
+    *backend.op_delay.lock().unwrap() = std::time::Duration::from_millis(250);
+
+    let complete = format!("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>");
+    drop_in_the_middle(&service, &backend, request_with("POST", &format!("/bucket/big?uploadId={id}"), &[], complete.as_bytes()), "complete started").await;
+    wait_for(&backend, "complete finished").await;
+    assert_eq!(backend.inner.object(BUCKET, "big").unwrap(), "the one part");
+    assert_eq!(backend.inner.open_uploads(), 0);
+}
+
+#[tokio::test]
+async fn the_authentication_of_such_an_operation_ends_too_and_the_hook_gets_its_call() {
+    let (service, backend) = service(support::config());
+    backend.inner.insert(BUCKET, "k", b"x");
+    *backend.auth_delay.lock().unwrap() = std::time::Duration::from_millis(250);
+    let answering = tokio::spawn({
+        let service = service.clone();
+        async move { service.handle(request_with("DELETE", "/bucket/k", &[], b"")).await }
+    });
+    wait_for(&backend, "before:AKIATESTKEY").await;
+    answering.abort();
+    let _ = answering.await;
+    wait_for(&backend, "after:AKIATESTKEY:Verified").await;
+    wait_for(&backend, "delete finished").await;
+    assert!(backend.inner.object(BUCKET, "k").is_none());
+}
+
+#[tokio::test]
+async fn with_the_setting_off_the_operation_goes_with_its_client() {
+    let (service, backend) = slow_service(ServerConfig { detach_mutations: false, ..support::config() });
+    backend.inner.insert(BUCKET, "k", b"x");
+    drop_in_the_middle(&service, &backend, request_with("DELETE", "/bucket/k", &[], b""), "delete started").await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!backend.events().iter().any(|event| event == "delete finished"), "{:?}", backend.events());
+    assert!(backend.inner.object(BUCKET, "k").is_some());
+}
+
+#[tokio::test]
+async fn a_backend_that_panics_in_such_an_operation_is_an_internal_error_and_not_a_dead_connection() {
+    let (service, backend) = service(support::config());
+    backend.inner.insert(BUCKET, "k", b"x");
+    backend.panic_on_delete.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (status, body) = answer_of(&service, request_with("DELETE", "/bucket/k", &[], b"")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(tag(&body, "Code").as_deref(), Some("InternalError"));
+    // And the service goes on.
+    backend.panic_on_delete.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (status, _) = answer_of(&service, request_with("DELETE", "/bucket/k", &[], b"")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}

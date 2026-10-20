@@ -45,13 +45,15 @@ pub struct ClientConfig {
     pub allow_http: bool,
     /// How long to wait for a connection. Default 10 seconds.
     pub connect_timeout: Duration,
-    /// How long a connection may be silent: waiting for the answer to start, and between the pieces of a download. The total time of a transfer
-    /// is not limited, so large files and slow connections are not interrupted. Default 30 seconds.
+    /// How long a connection may be silent: while a request is being sent (the time between pieces of it), waiting for the answer to start after it,
+    /// and between the pieces of a download. The total time of a transfer is not limited, so large files and slow connections are not
+    /// interrupted. Default 30 seconds.
     pub read_timeout: Duration,
     /// How many times a request is repeated after it failed in a way that can pass (the connection, a time-out, 500, 502, 503, 504, `SlowDown`).
     /// For a download that broke off, how many breaks in a row without receiving anything are tried again. Default 3.
     pub max_retries: u32,
-    /// How long, from the start of a request or of a download, retries and resuming go on. Default 3 minutes.
+    /// How long, from the start of a request, retries go on; and for a download, how long resuming goes on without the download having received a
+    /// good amount of data (64 KiB), so that a download that moves is never cut off by it. Default 3 minutes.
     pub retry_timeout: Duration,
     /// The wait before the first repeat. It doubles each time, with random variation. Default 100 milliseconds.
     pub backoff_initial: Duration,
@@ -66,6 +68,9 @@ pub struct ClientConfig {
     pub bulk_delete: bool,
     /// Added to the `User-Agent` header. Default none.
     pub user_agent: Option<String>,
+    /// More certificates to trust as roots, each one DER encoded, besides those of the operating system: for a service with a certificate from a
+    /// private authority. See also [`root_certificates_pem`](Self::root_certificates_pem). Default none.
+    pub root_certificates: Vec<Vec<u8>>,
 }
 
 impl ClientConfig {
@@ -88,6 +93,7 @@ impl ClientConfig {
             multipart_concurrency: 4,
             bulk_delete: true,
             user_agent: None,
+            root_certificates: Vec::new(),
         }
     }
 
@@ -103,6 +109,28 @@ impl ClientConfig {
     pub fn region(mut self, region: impl Into<String>) -> Self {
         self.region = region.into();
         self
+    }
+
+    /// Trusts the certificates in this PEM text as roots, besides those of the operating system. The certificate of a private authority (or the
+    /// self-signed certificate of a service) goes here, and the service is then reached with TLS and a certificate that is checked as usual: its
+    /// chain has to end in one of these or in a root of the system, and its name has to match the host.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when the text has no certificate or cannot be read.
+    pub fn root_certificates_pem(mut self, pem: &str) -> Result<Self, crate::Error> {
+        use rustls::pki_types::CertificateDer;
+        use rustls::pki_types::pem::PemObject;
+        let mut found = Vec::new();
+        for certificate in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+            let certificate = certificate.map_err(|error| crate::Error::Config(format!("the PEM text of the root certificates cannot be read: {error}")))?;
+            found.push(certificate.as_ref().to_vec());
+        }
+        if found.is_empty() {
+            return Err(crate::Error::Config("the PEM text has no certificate in it".to_owned()));
+        }
+        self.root_certificates.extend(found);
+        Ok(self)
     }
 }
 

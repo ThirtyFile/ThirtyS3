@@ -15,6 +15,17 @@ use thirtys3_core::s3_error::code;
 
 use crate::config::ServerConfig;
 
+impl Op {
+    /// Whether the operation changes something that a backend can be left half done with when the request is dropped, and that has no body to
+    /// read as it goes: the service finishes it whatever becomes of the client (see [`ServerConfig::detach_mutations`](crate::ServerConfig)).
+    pub(crate) fn runs_to_the_end(self) -> bool {
+        matches!(
+            self,
+            Self::CopyObject | Self::DeleteObject | Self::DeleteObjects | Self::CreateMultipartUpload | Self::CompleteMultipartUpload | Self::AbortMultipartUpload
+        )
+    }
+}
+
 /// An operation the service does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

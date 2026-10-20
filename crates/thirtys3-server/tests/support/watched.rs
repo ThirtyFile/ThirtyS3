@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use thirtys3_core::S3Error;
@@ -34,6 +35,12 @@ pub struct Watched {
     pub unreadable: Arc<Mutex<HashSet<String>>>,
     /// `copy_object` is given no conditions on the source, as a backend that leaves them to the service.
     pub forget_source_conditions: Arc<AtomicBool>,
+    /// How long the operations that change something take, so that a test can drop the request in the middle of one.
+    pub op_delay: Arc<Mutex<Duration>>,
+    /// How long `secret_key` takes.
+    pub auth_delay: Arc<Mutex<Duration>>,
+    /// `delete_object` panics.
+    pub panic_on_delete: Arc<AtomicBool>,
 }
 
 impl Watched {
@@ -49,6 +56,9 @@ impl Watched {
             short_delete_results: Arc::default(),
             unreadable: Arc::default(),
             forget_source_conditions: Arc::default(),
+            op_delay: Arc::default(),
+            auth_delay: Arc::default(),
+            panic_on_delete: Arc::default(),
             token: Arc::default(),
         }
     }
@@ -60,11 +70,23 @@ impl Watched {
     fn note(&self, event: impl Into<String>) {
         self.events.lock().unwrap().push(event.into());
     }
+
+    /// An operation that changes something takes its time, and says when it began and when it was done.
+    async fn slow<T>(&self, name: &str, work: impl std::future::Future<Output = T>) -> T {
+        self.note(format!("{name} started"));
+        let delay = *self.op_delay.lock().unwrap();
+        tokio::time::sleep(delay).await;
+        let result = work.await;
+        self.note(format!("{name} finished"));
+        result
+    }
 }
 
 #[async_trait]
 impl Backend for Watched {
     async fn secret_key(&self, access_key: &str) -> Result<Option<Credential>, S3Error> {
+        let delay = *self.auth_delay.lock().unwrap();
+        tokio::time::sleep(delay).await;
         if self.refused.lock().unwrap().contains(access_key) {
             return Err(S3Error::new("AccessDenied", "This access key is stopped"));
         }
@@ -125,14 +147,15 @@ impl Backend for Watched {
         if self.forget_source_conditions.load(Ordering::Relaxed) {
             request.source_conditions = Default::default();
         }
-        self.inner.copy_object(ctx, request).await
+        self.slow("copy", self.inner.copy_object(ctx, request)).await
     }
 
     async fn delete_object(&self, ctx: &Ctx<'_>, bucket: &str, key: &str) -> Result<(), S3Error> {
+        assert!(!self.panic_on_delete.load(Ordering::Relaxed), "a backend that panics");
         if self.undeletable.lock().unwrap().contains(key) {
             return Err(S3Error::new("AccessDenied", "Access Denied"));
         }
-        self.inner.delete_object(ctx, bucket, key).await
+        self.slow("delete", self.inner.delete_object(ctx, bucket, key)).await
     }
 
     async fn delete_objects(&self, ctx: &Ctx<'_>, bucket: &str, targets: &[DeleteTarget]) -> Result<Vec<Result<(), S3Error>>, S3Error> {
@@ -155,7 +178,7 @@ impl Backend for Watched {
     }
 
     async fn create_multipart_upload(&self, ctx: &Ctx<'_>, request: CreateMultipartUploadRequest) -> Result<String, S3Error> {
-        self.inner.create_multipart_upload(ctx, request).await
+        self.slow("create", self.inner.create_multipart_upload(ctx, request)).await
     }
 
     async fn upload_part(&self, ctx: &Ctx<'_>, request: UploadPartRequest) -> Result<UploadPartOutput, S3Error> {
@@ -167,11 +190,11 @@ impl Backend for Watched {
         if self.fail_complete.load(Ordering::Relaxed) {
             return Err(S3Error::new("InternalError", "We encountered an internal error. Please try again."));
         }
-        self.inner.complete_multipart_upload(ctx, request).await
+        self.slow("complete", self.inner.complete_multipart_upload(ctx, request)).await
     }
 
     async fn abort_multipart_upload(&self, ctx: &Ctx<'_>, bucket: &str, key: &str, upload_id: &str) -> Result<(), S3Error> {
-        self.inner.abort_multipart_upload(ctx, bucket, key, upload_id).await
+        self.slow("abort", self.inner.abort_multipart_upload(ctx, bucket, key, upload_id)).await
     }
 
     async fn list_parts(&self, ctx: &Ctx<'_>, request: ListPartsRequest) -> Result<ListPartsOutput, S3Error> {

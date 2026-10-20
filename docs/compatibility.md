@@ -13,6 +13,7 @@ This page is the long version of the README: exactly which parts of S3 are cover
 | Conditions: `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, copy-source conditions | `If-Match` and `If-None-Match` on put, `If-Match` on get and when a download resumes | all of them |
 | Retries, clock-skew correction, a `200` with an `<Error>` body | yes | can answer a failed `CompleteMultipartUpload` that way (`ServerConfig::complete_failures_in_ok_response`) |
 | Path-style and virtual-hosted addressing | yes | yes (`ServerConfig::virtual_host_suffixes`) |
+| TLS | system certificate store, plus roots of your own (`ClientConfig::root_certificates_pem`) | not its job: terminate TLS where you serve connections |
 
 ### Not supported
 
@@ -45,13 +46,12 @@ of a transfer.
 
 These are things the library does not do yet, or does on purpose, that a deployment should know about.
 
-- **Client TLS** uses the certificate store of the operating system and cannot be given another root certificate. A store with a private CA has to
-  have the CA installed on the machine.
 - **Client hashing** runs on the thread that polls the request: the SHA-256 of a part of 8 MiB is a few milliseconds, which is fine for a handful of
   concurrent uploads and not for hundreds.
 - **Server body timeout** is a time of silence, not a minimum rate (see above). Bound the rate or the total time where connections are served.
-- **A backend must be ready to be dropped.** When a client goes away, the future that is answering it is dropped at whatever `.await` it is on, in
-  the middle of a copy or of the completing of an upload as well. The documentation of the `Backend` trait says what that means for an upload's body.
+- **What is dropped with its client.** Operations that change something and have no body (copy, deletes, creating, completing and aborting an
+  upload) run to their end after the client has gone (`ServerConfig::detach_mutations`, on by default). Reads and uploads stop with it, and an
+  upload's body gives its backend an error; the documentation of the `Backend` trait says what a backend does with that.
 - **The path of a request** is decoded once, after the bucket and the key are told apart, and signed as it was sent. A reverse proxy that rewrites
   `%2F` or `//` before the service sees them changes what was signed.
 

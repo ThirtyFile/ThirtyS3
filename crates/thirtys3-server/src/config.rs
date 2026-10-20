@@ -36,6 +36,12 @@ pub struct ServerConfig {
     /// time of a request (or its rate) does it where it serves connections, or in a layer around the service. The timeout needs a Tokio runtime,
     /// and the service does as a whole (it has no other use of Tokio than this timer, and `None` removes even that).
     pub body_idle_timeout: Option<std::time::Duration>,
+    /// Run an operation that changes something (`CopyObject`, `DeleteObject`, `DeleteObjects`, and creating, completing and aborting a multipart
+    /// upload) to its end even when the client has gone away. Without it, the future that answers a request is dropped with the connection, at
+    /// whatever `.await` it is on, and the backend is left in the middle of a copy or of putting an upload together. With it, the operation, and
+    /// the authentication before it, run in a task of their own; the answer is lost if the client is not there to get it. An upload is not
+    /// such an operation: when its client goes, it stops. This needs a Tokio runtime, as the idle timeout does. Default on.
+    pub detach_mutations: bool,
 }
 
 impl Default for ServerConfig {
@@ -52,6 +58,7 @@ impl Default for ServerConfig {
             reject_unsupported_headers: true,
             complete_failures_in_ok_response: false,
             body_idle_timeout: Some(std::time::Duration::from_secs(30)),
+            detach_mutations: true,
         }
     }
 }
