@@ -28,6 +28,10 @@ pub struct ServerConfig {
     /// S3 does when it fails after it has begun to answer. Clients that know S3 treat such an answer as a failure to retry; others see a success
     /// that is not one. Default off.
     pub complete_failures_in_ok_response: bool,
+    /// How long the service waits for the next piece of the body of an upload (or of a document) before it gives up with `RequestTimeout`. This
+    /// guards against a client that opens a request and then sends nothing; the time to read the head of a request and the idle time of a
+    /// connection are for the code that serves the connections. Default 30 seconds; `None` waits for ever.
+    pub body_idle_timeout: Option<std::time::Duration>,
 }
 
 impl Default for ServerConfig {
@@ -43,6 +47,7 @@ impl Default for ServerConfig {
             max_delimiter_length: 64,
             reject_unsupported_headers: true,
             complete_failures_in_ok_response: false,
+            body_idle_timeout: Some(std::time::Duration::from_secs(30)),
         }
     }
 }

@@ -81,6 +81,8 @@ pub struct BodyPlan {
     pub max_size: u64,
     /// The largest chunk accepted.
     pub max_chunk: u64,
+    /// How long to wait for the next piece of the body; `None` waits for ever.
+    pub idle_timeout: Option<std::time::Duration>,
 }
 
 fn malformed_trailer(message: &str) -> S3Error {
@@ -94,6 +96,7 @@ struct State {
     chain: Option<ChunkChain>,
     plan_length: Option<u64>,
     max_size: u64,
+    idle_timeout: Option<std::time::Duration>,
     payload_sha256: Option<String>,
     content_md5: Option<Vec<u8>>,
     header_checksums: Vec<(ChecksumAlgorithm, Vec<u8>)>,
@@ -258,7 +261,13 @@ impl State {
                 self.finished = true;
                 continue;
             }
-            match self.inner.frame().await {
+            let frame = match self.idle_timeout {
+                None => self.inner.frame().await,
+                Some(wait) => tokio::time::timeout(wait, self.inner.frame()).await.map_err(|_| {
+                    S3Error::new(code::REQUEST_TIMEOUT, "Your socket connection to the server was not read from or written to within the timeout period.")
+                })?,
+            };
+            match frame {
                 None => self.inner_done = true,
                 Some(Err(error)) => return Err(S3Error::new(code::INCOMPLETE_BODY, format!("The request body could not be read: {error}"))),
                 Some(Ok(frame)) => {
@@ -329,6 +338,7 @@ impl RequestBody {
             chain,
             plan_length: plan.length,
             max_size: plan.max_size,
+            idle_timeout: plan.idle_timeout,
             md5: ChecksumAlgorithm::Md5.hasher(),
             sha256: plan.payload_sha256.is_some().then(|| ChecksumAlgorithm::Sha256.hasher()),
             payload_sha256: plan.payload_sha256,
@@ -373,6 +383,7 @@ impl RequestBody {
                 trailer_checksums: Vec::new(),
                 max_size: u64::MAX,
                 max_chunk: 8 * 1024 * 1024,
+                idle_timeout: None,
             },
         )
     }

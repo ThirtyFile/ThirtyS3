@@ -6,6 +6,25 @@
 //!   and [`s3_error`] (the `<Error>` document and the table of error codes).
 //! - Integrity: [`checksum`] (the ten algorithms of S3, streaming) and [`etag`] (ETags and `If-Match` / `If-None-Match`).
 //!
+//! ```
+//! use thirtys3_core::sigv4::EMPTY_PAYLOAD_SHA256;
+//! use thirtys3_core::{Credentials, Request, Signer, Timestamp, parse_request_auth};
+//!
+//! // A client signs a request ...
+//! let signer = Signer::new(Credentials::new("ACCESS_KEY", "SECRET_KEY"), "us-east-1");
+//! let host = [("host", "s3.example.com")];
+//! let request = Request { method: "GET", path: "/bucket/key", query: "", headers: &host };
+//! let signed = signer.sign(&request, EMPTY_PAYLOAD_SHA256, Timestamp::now()).unwrap();
+//!
+//! // ... and a server checks it, with the secret it finds for the access key.
+//! let headers: Vec<(&str, &str)> = host.iter().copied().chain(signed.headers.iter().map(|(name, value)| (name.as_str(), value.as_str()))).collect();
+//! let received = Request { method: "GET", path: "/bucket/key", query: "", headers: &headers };
+//! let auth = parse_request_auth(&received).unwrap().expect("the request is signed");
+//! assert_eq!(auth.access_key_id, "ACCESS_KEY");
+//! assert!(auth.verify(&received, "SECRET_KEY", Timestamp::now()).is_ok());
+//! assert!(auth.verify(&received, "OTHER_SECRET", Timestamp::now()).is_err());
+//! ```
+//!
 //! Every module names the pages of the AWS documentation it follows. Some of those pages are no longer in the current documentation; where that
 //! is so, the module says which archived version it uses.
 

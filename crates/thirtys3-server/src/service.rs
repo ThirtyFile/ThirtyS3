@@ -289,7 +289,17 @@ impl<B: Backend> S3Service<B> {
         if !trailer_checksums.is_empty() && !matches!(framing, Framing::Chunked { trailers: true, .. }) {
             return Err(invalid("x-amz-trailer is for a body in aws-chunked chunks with trailing headers".to_owned()));
         }
-        Ok(BodyPlan { framing, length, payload_sha256, content_md5, checksums, trailer_checksums, max_size, max_chunk: self.inner.config.max_chunk_size })
+        Ok(BodyPlan {
+            framing,
+            length,
+            payload_sha256,
+            content_md5,
+            checksums,
+            trailer_checksums,
+            max_size,
+            max_chunk: self.inner.config.max_chunk_size,
+            idle_timeout: self.inner.config.body_idle_timeout,
+        })
     }
 
     /// The headers that report the checksums of data that was received: the algorithms the request named, with what was worked out.

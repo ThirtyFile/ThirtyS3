@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/thirtys3-core", "crates/thirtys3-client", "crates/thirtys3-server"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ repository = "https://github.com/ThirtyFile/ThirtyS3"
 readme = "README.md"
 
 [workspace.dependencies]
-thirtys3-core = { path = "crates/thirtys3-core", version = "0.0.0" }
+thirtys3-core = { path = "crates/thirtys3-core", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

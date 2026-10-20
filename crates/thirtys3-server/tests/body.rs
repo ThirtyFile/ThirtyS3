@@ -55,6 +55,7 @@ fn plan(framing: Framing) -> BodyPlan {
         trailer_checksums: Vec::new(),
         max_size: u64::MAX,
         max_chunk: 8 * 1024 * 1024,
+        idle_timeout: None,
     }
 }
 

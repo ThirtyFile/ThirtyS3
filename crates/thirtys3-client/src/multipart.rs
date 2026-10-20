@@ -69,7 +69,7 @@ impl MultipartUpload {
         if let Some((algorithm, value)) = &checksum {
             spec = spec.header(algorithm.header_name(), value.clone());
         }
-        let (parts, _) = self.client.execute_for_body(&spec, ANSWER_LIMIT).await?;
+        let parts = self.client.execute_ignoring_body(&spec).await?;
         let etag =
             parts.headers.get("etag").and_then(|etag| etag.to_str().ok()).ok_or_else(|| Error::Protocol("the answer to UploadPart has no ETag".to_owned()))?;
         Ok(UploadedPart { part_number, etag: etag.trim().to_owned(), checksum: checksum.map(|(_, value)| value) })

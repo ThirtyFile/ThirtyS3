@@ -206,22 +206,27 @@ impl Client {
         let server_time = response.headers().get(http::header::DATE).and_then(|date| date.to_str().ok()).and_then(Timestamp::parse_http_date);
         let status = response.status().as_u16();
         let head_only = spec.method == Method::HEAD;
-        let body = if head_only { Bytes::new() } else { self.read_limited(response.into_body(), MAX_ERROR_BODY).await.map_err(|error| (error, server_time))? };
+        let body = if head_only { Bytes::new() } else { self.read_limited(response.into_body(), MAX_ERROR_BODY).await.map_err(|error| (error, server_time))?.0 };
         Err((error_from_body(status, &body, head_only), server_time))
     }
 
-    /// Reads a body up to a limit (the rest is dropped).
-    async fn read_limited(&self, mut body: Incoming, limit: usize) -> Result<Bytes, Error> {
+    /// Reads a body up to a limit. A body that is longer is not read to its end (which may never come): the bytes up to the limit are returned,
+    /// and `true` says there was more.
+    async fn read_limited(&self, mut body: Incoming, limit: usize) -> Result<(Bytes, bool), Error> {
         let mut data = BytesMut::new();
         loop {
             match tokio::time::timeout(self.inner.transport.read_timeout, body.frame()).await {
                 Err(_) => return Err(Error::Timeout("the response stopped coming".to_owned())),
-                Ok(None) => return Ok(data.freeze()),
+                Ok(None) => return Ok((data.freeze(), false)),
                 Ok(Some(Err(error))) => return Err(body_error(&error)),
                 Ok(Some(Ok(frame))) => {
                     if let Ok(chunk) = frame.into_data() {
-                        let room = limit.saturating_sub(data.len());
-                        data.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                        let room = limit - data.len();
+                        if chunk.len() > room {
+                            data.extend_from_slice(&chunk[..room]);
+                            return Ok((data.freeze(), true));
+                        }
+                        data.extend_from_slice(&chunk);
                     }
                 }
             }
@@ -258,11 +263,21 @@ impl Client {
         }
     }
 
-    /// Sends a request and reads its whole (small) body.
+    /// Sends a request and reads its whole (small) body. A body longer than `limit` is an error: no answer of S3 to the calls that use this is so long.
     pub(crate) async fn execute_for_body(&self, spec: &Spec, limit: usize) -> Result<(http::response::Parts, Bytes), Error> {
         let (parts, body) = self.execute(spec).await?.into_parts();
-        let bytes = self.read_limited(body, limit).await?;
+        let (bytes, more) = self.read_limited(body, limit).await?;
+        if more {
+            return Err(Error::Protocol(format!("the response has more than the {limit} bytes it can have")));
+        }
         Ok((parts, bytes))
+    }
+
+    /// Sends a request whose answer has no body that matters (an empty one, in S3). What it does have is not read past a limit.
+    pub(crate) async fn execute_ignoring_body(&self, spec: &Spec) -> Result<http::response::Parts, Error> {
+        let (parts, body) = self.execute(spec).await?.into_parts();
+        self.read_limited(body, 64 * 1024).await?;
+        Ok(parts)
     }
 }
 

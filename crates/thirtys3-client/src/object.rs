@@ -137,7 +137,7 @@ impl Client {
         if let Some(algorithm) = options.checksum {
             spec = spec.header(algorithm.header_name(), algorithm.checksum_base64(&data));
         }
-        let (parts, _) = self.execute_for_body(&spec, 64 * 1024).await?;
+        let parts = self.execute_ignoring_body(&spec).await?;
         Ok(PutResult::from_headers(&parts.headers))
     }
 

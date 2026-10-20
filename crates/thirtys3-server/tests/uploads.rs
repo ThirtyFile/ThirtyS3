@@ -389,3 +389,49 @@ async fn a_failed_complete_can_be_answered_with_200_and_an_error_document_as_s3_
         assert!(done.text().contains("CompleteMultipartUploadResult"));
     }
 }
+
+// ---- clients that stop sending ----
+
+fn quick_config(idle: Duration) -> thirtys3_server::ServerConfig {
+    thirtys3_server::ServerConfig { body_idle_timeout: Some(idle), ..support::config() }
+}
+
+#[tokio::test]
+async fn a_client_that_stops_in_the_middle_of_a_body_is_answered_with_a_timeout_and_nothing_is_kept() {
+    let backend = Watched::new();
+    let server = start_with(backend.clone(), quick_config(Duration::from_millis(200))).await;
+    let (headers, _) = signed_headers(&server.host(), "PUT", "/bucket/stalled", &[], Some(1000), "UNSIGNED-PAYLOAD", &support::signer());
+    let mut stream = connect(&server).await;
+    stream.write_all(&request_head("PUT", "/bucket/stalled", &headers)).await.unwrap();
+    stream.write_all(&[3; 10]).await.unwrap();
+    stream.flush().await.unwrap();
+    // The client sends no more and keeps the connection open.
+    let mut answer = vec![0; 4096];
+    use tokio::io::AsyncReadExt;
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut answer)).await.expect("the service gave up").unwrap();
+    let text = String::from_utf8_lossy(&answer[..read]);
+    assert!(text.starts_with("HTTP/1.1 400"), "{text}");
+    assert!(text.contains("<Code>RequestTimeout</Code>"), "{text}");
+    assert!(backend.inner.keys(BUCKET).is_empty());
+    assert_eq!(backend.events().last().map(String::as_str), Some("put finished:error"));
+}
+
+#[tokio::test]
+async fn a_slow_upload_that_keeps_sending_is_not_cut_off() {
+    let server = start_with(Watched::new(), quick_config(Duration::from_millis(400))).await;
+    let content = data(6000);
+    let (headers, _) = signed_headers(&server.host(), "PUT", "/bucket/slow", &[], Some(content.len()), &sha256_hex(&content), &support::signer());
+    let mut stream = connect(&server).await;
+    stream.write_all(&request_head("PUT", "/bucket/slow", &headers)).await.unwrap();
+    // More than the time allowed in all, and never longer than that without a byte.
+    for piece in content.chunks(1000) {
+        stream.write_all(piece).await.unwrap();
+        stream.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let mut answer = vec![0; 4096];
+    use tokio::io::AsyncReadExt;
+    let read = stream.read(&mut answer).await.unwrap();
+    assert!(String::from_utf8_lossy(&answer[..read]).starts_with("HTTP/1.1 200"), "{}", String::from_utf8_lossy(&answer[..read]));
+    assert_eq!(server.service.backend().inner.object(BUCKET, "slow").unwrap(), content);
+}
