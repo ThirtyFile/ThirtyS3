@@ -1,0 +1,6 @@
+# What CodeQL scans. The tests and the fuzz targets are left out: they hold the signing keys of the AWS documentation and other secrets that only exist to be
+# signed with, and CodeQL reports each of them as a hard-coded cryptographic value. The library is under crates/*/src and is scanned.
+name: ThirtyS3
+paths-ignore:
+  - "**/tests/**"
+  - fuzz/**

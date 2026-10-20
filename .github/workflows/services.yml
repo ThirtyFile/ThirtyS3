@@ -38,7 +38,13 @@ jobs:
             -e RUSTFS_ACCESS_KEY="$THIRTYS3_TEST_ACCESS_KEY" -e RUSTFS_SECRET_KEY="$THIRTYS3_TEST_SECRET_KEY" \
             --tmpfs /data:rw,mode=1777 --tmpfs /logs:rw,mode=1777 \
             rustfs/rustfs:1.0.3
-          curl --silent --fail --retry 60 --retry-connrefused --retry-delay 1 --output /dev/null http://127.0.0.1:9000/health
+          # The service answers with a reset connection for a moment while it starts, which curl's own retries do not cover: ask again until it is up
+          for _ in $(seq 1 60); do
+            curl --silent --fail --output /dev/null http://127.0.0.1:9000/health && exit 0
+            sleep 1
+          done
+          docker logs rustfs | tail -50
+          exit 1
       - name: Create the bucket
         env:
           AWS_ACCESS_KEY_ID: ${{ env.THIRTYS3_TEST_ACCESS_KEY }}

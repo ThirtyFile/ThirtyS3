@@ -104,10 +104,13 @@ async fn an_upload_that_takes_longer_than_the_read_timeout_but_moves_is_not_cut_
 async fn an_upload_that_stops_moving_is_a_timeout() {
     let endpoint = slow_reader(Duration::from_millis(1), true).await;
     let client = plain_client(&endpoint, Duration::from_millis(400));
+    // Made before the clock starts: making 64 MiB and working out its SHA-256 takes seconds in a build for tests on a slow machine
+    let data = Bytes::from(content(64 * MIB));
     let started = Instant::now();
-    let error = client.put("big", Bytes::from(content(64 * MIB)), &PutOptions::default()).await.unwrap_err();
+    let error = client.put("big", data, &PutOptions::default()).await.unwrap_err();
     assert!(matches!(error, Error::Timeout(_)), "{error:?}");
-    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    // The service waits for 30 seconds: a call that ended long before is one that gave up on the silence
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
 }
 
 // ---- a request that was done and whose answer was lost ----
@@ -409,13 +412,13 @@ async fn a_wait_that_would_end_after_the_retry_timeout_is_not_waited() {
     let mut settings = config(&server);
     settings.max_retries = 5;
     settings.retry_timeout = Duration::from_millis(100);
-    settings.backoff_initial = Duration::from_millis(600);
-    settings.backoff_max = Duration::from_millis(600);
+    settings.backoff_initial = Duration::from_secs(3);
+    settings.backoff_max = Duration::from_secs(3);
     let client = Client::new(settings).unwrap();
     server.fault(Some(Method::HEAD), None, None, 10, Fault::Status(503, "SlowDown"));
     let started = Instant::now();
     assert!(client.head("k").await.is_err());
-    assert!(started.elapsed() < Duration::from_millis(400), "it waited for a retry that was past the time allowed: {:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_millis(1500), "it waited for a retry that was past the time allowed: {:?}", started.elapsed());
     assert_eq!(server.requests_matching(Method::HEAD, "k").len(), 1);
 }
 
