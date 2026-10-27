@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "thirtys3-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "crc-fast",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "thirtys3-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
