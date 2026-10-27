@@ -1,0 +1,28 @@
+# New security advisories for the dependencies, looked for every week: the pull-request checks run cargo deny only when there is a pull request, and an
+# advisory is published when it is published, not when we change something. A failed run is the sign. The lock files are the ones the project
+# is built with (the main one, and the one of the fuzz crate).
+name: Advisories
+
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: Advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-deny
+      - run: cargo deny check advisories
+      - run: cargo deny --manifest-path fuzz/Cargo.toml check advisories
