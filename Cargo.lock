@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "thirtys3-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "thirtys3-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "thirtys3-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "bytes",
